@@ -1,4 +1,4 @@
-from django.db.models import Q
+﻿from django.db.models import Q
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -32,7 +32,7 @@ def error_response(message, errors=None, status_code=status.HTTP_400_BAD_REQUEST
 
 
 def get_students_qs():
-    return User.objects.filter(role="student").select_related("group").order_by("-points", "full_name")
+    return User.objects.filter(role="student", is_iman_student=True).select_related("group").order_by("-points", "full_name")
 
 
 def get_place(user, qs):
@@ -54,7 +54,7 @@ class GlobalRatingsView(APIView):
             result.append(student)
 
         data = RatingItemSerializer(result, many=True).data
-        return success_response("Global ratings", data)
+        return success_response("Iman students ratings", data)
 
 
 class GroupRatingsView(APIView):
@@ -66,7 +66,7 @@ class GroupRatingsView(APIView):
             return error_response("Group not found", {"group": ["not found"]}, 404)
 
         students = list(
-            User.objects.filter(role="student", group_id=group_id)
+            User.objects.filter(role="student", group_id=group_id, is_iman_student=True)
             .select_related("group")
             .order_by("-points", "full_name")
         )
@@ -106,7 +106,7 @@ class MyRatingsView(APIView):
 
         if user.group_id:
             group_qs = (
-                User.objects.filter(role="student", group_id=user.group_id)
+                User.objects.filter(role="student", group_id=user.group_id, is_iman_student=True)
                 .select_related("group")
                 .order_by("-points", "full_name")
             )

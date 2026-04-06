@@ -16,12 +16,61 @@ import dj_database_url
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def load_local_env(base_dir):
+    env_path = base_dir / ".env"
+    if not env_path.exists():
+        return
+
+    try:
+        content = env_path.read_text(encoding="utf-8")
+    except OSError:
+        return
+
+    parsed = {}
+
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+        if key:
+            parsed[key] = value
+
+    for key, value in parsed.items():
+        if key not in os.environ:
+            os.environ[key] = value
+
+
+load_local_env(BASE_DIR)
+
 SECRET_KEY = 'django-insecure-$df@^i_y!ajgzk_j1(0^692yup&^v!s0+41)g_v-a8j&e)u-#s'
 
 DEBUG = os.environ.get("DEBUG", "False") == "True"
 
-ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "").split(",")
-CSRF_TRUSTED_ORIGINS = os.environ.get("CSRF_TRUSTED_ORIGINS", "").split(",") if os.environ.get("CSRF_TRUSTED_ORIGINS") else []
+def get_env_list(name: str, default: str = ""):
+    raw = os.environ.get(name, default)
+    values = []
+    for item in raw.split(","):
+        value = item.strip().rstrip("/")
+        if value:
+            values.append(value)
+    return values
+
+
+ALLOWED_HOSTS = get_env_list("ALLOWED_HOSTS", "127.0.0.1,localhost")
+CSRF_TRUSTED_ORIGINS = get_env_list("CSRF_TRUSTED_ORIGINS")
+CORS_ALLOWED_ORIGINS = get_env_list("CORS_ALLOWED_ORIGINS")
+
+# Guaranteed production frontend origin (Vercel).
+VERCEL_FRONTEND_ORIGIN = "https://iman-bakhruz.vercel.app"
+if VERCEL_FRONTEND_ORIGIN not in CORS_ALLOWED_ORIGINS:
+    CORS_ALLOWED_ORIGINS.append(VERCEL_FRONTEND_ORIGIN)
+if VERCEL_FRONTEND_ORIGIN not in CSRF_TRUSTED_ORIGINS:
+    CSRF_TRUSTED_ORIGINS.append(VERCEL_FRONTEND_ORIGIN)
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -114,17 +163,18 @@ REST_FRAMEWORK = {
     ),
 }
 
-CORS_ALLOWED_ORIGINS = [
-    "http://127.0.0.1:5173",
-    "http://localhost:5173",
-    "http://127.0.0.1:3000",
-    "http://localhost:3000",
-    "http://127.0.0.1:4173",
-    "http://localhost:4173",
-]
-
 if DEBUG:
-    CORS_ALLOW_ALL_ORIGINS = True
+    local_cors_origins = [
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+        "http://localhost:3000",
+        "http://127.0.0.1:4173",
+        "http://localhost:4173",
+    ]
+    for origin in local_cors_origins:
+        if origin not in CORS_ALLOWED_ORIGINS:
+            CORS_ALLOWED_ORIGINS.append(origin)
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 

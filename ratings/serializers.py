@@ -23,6 +23,6 @@ class RatingItemSerializer(serializers.ModelSerializer):
 class MyRatingSerializer(serializers.Serializer):
     student_id = serializers.IntegerField()
     full_name = serializers.CharField()
-    points = serializers.IntegerField()
+    points = serializers.DecimalField(max_digits=8, decimal_places=2)
     group = serializers.DictField(allow_null=True)
     places = serializers.DictField()
