@@ -7,6 +7,7 @@ from decimal import Decimal
 from django.contrib.auth import authenticate
 from django.db import transaction
 from django.db.models import F
+from django.db.models import Count
 from django.core.files.base import ContentFile
 from django.shortcuts import get_object_or_404
 
@@ -18,7 +19,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from groups.models import Group
 from ratings.models import ScoreLog
-from .models import User, GrammarTopic, SupportTicket, AiConversation, AiMessage
+from .models import User, GrammarTopic, SupportTicket, AiConversation, AiMessage, FriendlyConversation, FriendlyMessage
 from .ai_service import generate_iman_ai_reply
 from .serializers import (
     RegisterSerializer,
@@ -37,6 +38,10 @@ from .serializers import (
     AiMessageSerializer,
     AiConversationSerializer,
     AiSendMessageSerializer,
+    FriendlyConversationSerializer,
+    FriendlyConversationCreateSerializer,
+    FriendlyMessageSerializer,
+    FriendlySendMessageSerializer,
 )
 
 
@@ -180,6 +185,66 @@ def can_teacher_access_student(teacher, student):
         and student.group_id is not None
         and student.group.teacher_id == teacher.id
     )
+
+
+def can_user_chat_with_target(user, target):
+    if user.id == target.id:
+        return False
+
+    if not target.is_active:
+        return False
+
+    if user.role == "teacher":
+        return can_teacher_access_student(user, target)
+
+    if user.role == "student":
+        if target.role == "teacher":
+            return bool(user.group_id and user.group and user.group.teacher_id == target.id)
+        if target.role == "student":
+            return target.is_iman_student
+
+    return False
+
+
+def get_or_create_direct_conversation(user, target):
+    conversation = (
+        FriendlyConversation.objects.filter(participants=user)
+        .filter(participants=target)
+        .annotate(participants_count=Count("participants"))
+        .filter(participants_count=2)
+        .first()
+    )
+    if conversation:
+        return conversation
+
+    conversation = FriendlyConversation.objects.create()
+    conversation.participants.add(user, target)
+    return conversation
+
+
+def serialize_friendly_conversation_item(request, conversation):
+    participants = list(conversation.participants.all())
+    peer = next((participant for participant in participants if participant.id != request.user.id), None)
+    last_message = conversation.messages.order_by("-created_at").first()
+
+    return {
+        "id": conversation.id,
+        "updatedAt": conversation.updated_at.isoformat(),
+        "peer": {
+            "id": str(peer.id) if peer else "",
+            "fullName": peer.full_name if peer else "",
+            "role": peer.role if peer else "",
+            "avatarUrl": avatar_url(request, peer) if peer else None,
+        },
+        "lastMessage": {
+            "id": str(last_message.id),
+            "text": last_message.text,
+            "senderId": str(last_message.sender_id),
+            "createdAt": last_message.created_at.isoformat(),
+        }
+        if last_message
+        else None,
+    }
 
 
 def save_ai_image_from_data_url(image_base64, user):
@@ -495,6 +560,30 @@ class PlatformStateView(APIView):
         return success_response_with_compat("Platform state fetched successfully", payload)
 
 
+class TeacherDeactivateStudentView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, student_id):
+        if request.user.role != "teacher":
+            return error_response("Only teachers can deactivate students", {"role": ["teacher only"]}, status.HTTP_403_FORBIDDEN)
+
+        student = get_object_or_404(User.objects.select_related("group", "group__teacher"), id=student_id, role="student")
+        if not can_teacher_access_student(request.user, student):
+            return error_response("Access denied", {"student": ["No access to this student"]}, status.HTTP_403_FORBIDDEN)
+
+        student.is_iman_student = False
+        student.is_active = False
+        student.group = None
+        student.save(update_fields=["is_iman_student", "is_active", "group"])
+
+        payload = {
+            "studentId": student.id,
+            "isImanStudent": student.is_iman_student,
+            "isActive": student.is_active,
+        }
+        return success_response("Student deactivated", payload)
+
+
 class TeacherMyGroupsView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -713,6 +802,63 @@ class AiChatMessagesView(APIView):
             "lastAssistantMessage": AiMessageSerializer(assistant_message, context={"request": request}).data,
         }
         return success_response("AI reply generated", payload, status.HTTP_201_CREATED)
+
+
+class FriendlyConversationsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        conversations = (
+            FriendlyConversation.objects.filter(participants=request.user)
+            .prefetch_related("participants", "messages")
+            .order_by("-updated_at")
+        )
+        data = [serialize_friendly_conversation_item(request, conversation) for conversation in conversations]
+        return success_response("Friendly conversations fetched", {"conversations": data})
+
+    def post(self, request):
+        serializer = FriendlyConversationCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("Validation error", serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        target_user_id = serializer.validated_data["targetUserId"]
+        target = get_object_or_404(User.objects.select_related("group", "group__teacher"), id=target_user_id)
+        if not can_user_chat_with_target(request.user, target):
+            return error_response("Access denied", {"targetUserId": ["Cannot chat with this user"]}, status.HTTP_403_FORBIDDEN)
+
+        conversation = get_or_create_direct_conversation(request.user, target)
+        data = serialize_friendly_conversation_item(request, conversation)
+        return success_response("Friendly conversation ready", {"conversation": data}, status.HTTP_201_CREATED)
+
+
+class FriendlyConversationMessagesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, conversation_id):
+        conversation = get_object_or_404(
+            FriendlyConversation.objects.filter(participants=request.user).prefetch_related("messages", "messages__sender"),
+            id=conversation_id,
+        )
+        messages = FriendlyMessageSerializer(conversation.messages.all(), many=True).data
+        return success_response("Friendly messages fetched", {"conversationId": conversation.id, "messages": messages})
+
+    def post(self, request, conversation_id):
+        conversation = get_object_or_404(
+            FriendlyConversation.objects.filter(participants=request.user).prefetch_related("participants"),
+            id=conversation_id,
+        )
+        serializer = FriendlySendMessageSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("Validation error", serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        message = FriendlyMessage.objects.create(
+            conversation=conversation,
+            sender=request.user,
+            text=serializer.validated_data["text"],
+        )
+        conversation.save(update_fields=["updated_at"])
+        payload = FriendlyMessageSerializer(message).data
+        return success_response("Friendly message sent", {"message": payload}, status.HTTP_201_CREATED)
 
 
 class GrammarTopicsView(APIView):

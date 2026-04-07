@@ -154,3 +154,28 @@ class AiMessage(models.Model):
     def __str__(self):
         return f"AI message #{self.id} ({self.role})"
 
+
+class FriendlyConversation(models.Model):
+    participants = models.ManyToManyField("users.User", related_name="friendly_conversations")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"Friendly conversation #{self.id}"
+
+
+class FriendlyMessage(models.Model):
+    conversation = models.ForeignKey(FriendlyConversation, on_delete=models.CASCADE, related_name="messages")
+    sender = models.ForeignKey("users.User", on_delete=models.CASCADE, related_name="sent_friendly_messages")
+    text = models.TextField(max_length=2000)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+
+    def __str__(self):
+        return f"Friendly message #{self.id} ({self.sender_id})"
+

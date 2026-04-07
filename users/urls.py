@@ -11,9 +11,12 @@ from .views import (
     UpdateAvatarView,
     TeacherMyGroupsView,
     TeacherGroupStudentsView,
+    TeacherDeactivateStudentView,
     TeacherScoreStudentView,
     TeacherScoreHistoryView,
     AiChatMessagesView,
+    FriendlyConversationsView,
+    FriendlyConversationMessagesView,
     GrammarTopicsView,
     SupportTicketListCreateView,
     SupportTicketUpdateView,
@@ -35,6 +38,7 @@ urlpatterns = [
     path("teacher/history", TeacherScoreHistoryView.as_view(), name="teacher-history"),
     path("teacher/groups", TeacherMyGroupsView.as_view(), name="teacher-groups"),
     path("teacher/groups/<int:group_id>/students", TeacherGroupStudentsView.as_view(), name="teacher-group-students"),
+    path("teacher/students/<int:student_id>/deactivate", TeacherDeactivateStudentView.as_view(), name="teacher-student-deactivate"),
     path(
         "teacher/groups/<int:group_id>/students/<int:student_id>/score",
         TeacherScoreStudentView.as_view(),
@@ -43,6 +47,8 @@ urlpatterns = [
     path("teacher/score", TeacherScoreStudentView.as_view(), name="teacher-score"),
 
     path("chat/ai/messages", AiChatMessagesView.as_view(), name="chat-ai-messages"),
+    path("chat/friendly/conversations", FriendlyConversationsView.as_view(), name="chat-friendly-conversations"),
+    path("chat/friendly/conversations/<int:conversation_id>/messages", FriendlyConversationMessagesView.as_view(), name="chat-friendly-messages"),
 
     path("grammar/topics", GrammarTopicsView.as_view(), name="grammar-topics"),
 

@@ -2,9 +2,45 @@
 from django.contrib.auth import get_user_model
 from groups.models import Group
 from ratings.models import ScoreLog
-from .models import GrammarTopic, SupportTicket, AiConversation, AiMessage
+from .models import GrammarTopic, SupportTicket, AiConversation, AiMessage, FriendlyConversation, FriendlyMessage
 
 User = get_user_model()
+
+
+def _normalize_phone(value):
+    phone = str(value or "").strip()
+    digits = "".join(ch for ch in phone if ch.isdigit())
+
+    if len(digits) == 9:
+        return f"+998{digits}"
+
+    if digits.startswith("998") and len(digits) >= 12:
+        return f"+998{digits[3:12]}"
+
+    return phone
+
+
+def _phone_variants(value):
+    normalized = _normalize_phone(value)
+    digits = "".join(ch for ch in normalized if ch.isdigit())
+    variants = []
+
+    def add(item):
+        item = str(item or "").strip()
+        if item and item not in variants:
+            variants.append(item)
+
+    add(value)
+    add(normalized)
+
+    if digits:
+        add(digits)
+        if digits.startswith("998") and len(digits) >= 12:
+            local = digits[3:12]
+            add(local)
+            add(f"+998{local}")
+
+    return variants
 
 
 class RegisterSerializer(serializers.Serializer):
@@ -17,9 +53,12 @@ class RegisterSerializer(serializers.Serializer):
     days_pattern = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     def validate_phone(self, value):
-        phone = value.strip()
-        if User.objects.filter(phone=phone).exists():
+        phone = _normalize_phone(value)
+        variants = _phone_variants(phone)
+
+        if User.objects.filter(phone__in=variants).exists():
             raise serializers.ValidationError("User with this phone already exists")
+
         return phone
 
     def validate(self, attrs):
@@ -54,7 +93,7 @@ class RegisterSerializer(serializers.Serializer):
         group = validated_data.pop("resolved_group", None)
         password = validated_data["password"]
         full_name = validated_data["full_name"].strip()
-        phone = validated_data["phone"].strip()
+        phone = _normalize_phone(validated_data["phone"])
 
         user = User.objects.create_user(
             full_name=full_name,
@@ -308,3 +347,36 @@ class AiSendMessageSerializer(serializers.Serializer):
         attrs["text"] = text
         attrs["imageBase64"] = image
         return attrs
+
+
+class FriendlyMessageSerializer(serializers.ModelSerializer):
+    sender_id = serializers.IntegerField(source="sender.id", read_only=True)
+    sender_name = serializers.CharField(source="sender.full_name", read_only=True)
+    sender_role = serializers.CharField(source="sender.role", read_only=True)
+
+    class Meta:
+        model = FriendlyMessage
+        fields = ("id", "sender_id", "sender_name", "sender_role", "text", "created_at")
+
+
+class FriendlyConversationSerializer(serializers.ModelSerializer):
+    messages = FriendlyMessageSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = FriendlyConversation
+        fields = ("id", "updated_at", "messages")
+
+
+class FriendlyConversationCreateSerializer(serializers.Serializer):
+    targetUserId = serializers.IntegerField()
+
+
+class FriendlySendMessageSerializer(serializers.Serializer):
+    text = serializers.CharField(max_length=2000)
+
+    def validate_text(self, value):
+        text = value.strip()
+        if len(text) < 1:
+            raise serializers.ValidationError("Message cannot be empty")
+        return text
+

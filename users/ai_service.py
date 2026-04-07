@@ -1,9 +1,9 @@
-import json
+﻿import json
+import os
 import re
 import urllib.error
 import urllib.parse
 import urllib.request
-import os
 
 
 AI_SYSTEM_PROMPT = """
@@ -23,19 +23,22 @@ Primary tasks:
 def _mock_reply(text, has_image):
     if has_image and text:
         return (
-            "Фото домашнего задания получено. Я проверил и даю базовую оценку:\n"
-            "- Проверь времена и артикли.\n"
-            "- Добавь 2-3 коротких предложения с новой лексикой.\n"
-            f"Твой вопрос: {text}"
+            "AI service is temporarily unavailable. I saved your photo and message.\n"
+            "Please try again in 1-2 minutes.\n"
+            f"Your message: {text}"
         )
     if has_image:
         return (
-            "Фото получено. Я готов проверить домашнее задание. "
-            "Напиши коротко, что проверить в первую очередь: grammar, vocabulary или writing."
+            "AI service is temporarily unavailable. I received your photo. "
+            "Please send a short text with what to check and try again in 1-2 minutes."
         )
     if text:
-        return f"Понял твой вопрос: «{text}». Давай разберем по шагам."
-    return "Отправь вопрос или фото домашнего задания."
+        return (
+            "AI service is temporarily unavailable. "
+            "Please try again in 1-2 minutes.\n"
+            f"Your message: {text}"
+        )
+    return "AI service is temporarily unavailable. Send text or homework photo and try again."
 
 
 def _extract_data_url_parts(image_data_url):
@@ -155,13 +158,14 @@ def _generate_with_openai(user_text, image_data_url):
         data = json.loads(raw)
         answer = _extract_openai_text(data)
         return answer or None
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        print(f"[IMAN_AI][OPENAI] request failed: {exc}")
         return None
 
 
 def _generate_with_gemini(user_text, image_data_url):
     api_key = os.environ.get("GEMINI_API_KEY", "").strip() or os.environ.get("GOOGLE_API_KEY", "").strip()
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+    configured_model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
     if not api_key:
         return None
 
@@ -194,18 +198,38 @@ def _generate_with_gemini(user_text, image_data_url):
         ]
     }
 
-    endpoint = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{urllib.parse.quote(model)}:generateContent?key={urllib.parse.quote(api_key)}"
-    )
+    model_candidates = []
+    for model_name in [configured_model, "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+        if model_name and model_name not in model_candidates:
+            model_candidates.append(model_name)
 
-    try:
-        raw = _post_json(endpoint, {"Content-Type": "application/json"}, payload, timeout=90)
-        data = json.loads(raw)
-        answer = _extract_gemini_text(data)
-        return answer or None
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        return None
+    api_versions = ["v1beta", "v1"]
+
+    for model in model_candidates:
+        for api_version in api_versions:
+            endpoint = (
+                f"https://generativelanguage.googleapis.com/{api_version}/models/"
+                f"{urllib.parse.quote(model)}:generateContent?key={urllib.parse.quote(api_key)}"
+            )
+            try:
+                raw = _post_json(endpoint, {"Content-Type": "application/json"}, payload, timeout=90)
+                data = json.loads(raw)
+                answer = _extract_gemini_text(data)
+                if answer:
+                    return answer
+            except urllib.error.HTTPError as exc:
+                body = ""
+                try:
+                    body = exc.read().decode("utf-8", "ignore")[:800]
+                except Exception:
+                    body = ""
+                print(f"[IMAN_AI][GEMINI] HTTP {exc.code} model={model} api={api_version} error={body}")
+                continue
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+                print(f"[IMAN_AI][GEMINI] request failed model={model} api={api_version}: {exc}")
+                continue
+
+    return None
 
 
 def generate_iman_ai_reply(text="", image_data_url=None):
