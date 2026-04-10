@@ -1,5 +1,6 @@
 ﻿import json
 import os
+import logging
 import re
 import urllib.error
 import urllib.parse
@@ -18,6 +19,9 @@ Primary tasks:
 3) Keep tone supportive and concise.
 4) Reply in the same language as the student message when possible.
 """.strip()
+
+
+logger = logging.getLogger(__name__)
 
 
 def _mock_reply(text, has_image):
@@ -59,7 +63,9 @@ def _post_json(url, headers, payload, timeout=60):
         headers=headers,
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as response:
+    # Ignore broken system proxy values (for example 127.0.0.1:9) and send direct HTTPS request.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=timeout) as response:
         return response.read().decode("utf-8")
 
 
@@ -159,7 +165,7 @@ def _generate_with_openai(user_text, image_data_url):
         answer = _extract_openai_text(data)
         return answer or None
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-        print(f"[IMAN_AI][OPENAI] request failed: {exc}")
+        logger.warning("[IMAN_AI][OPENAI] request failed: %s", exc)
         return None
 
 
@@ -223,10 +229,21 @@ def _generate_with_gemini(user_text, image_data_url):
                     body = exc.read().decode("utf-8", "ignore")[:800]
                 except Exception:
                     body = ""
-                print(f"[IMAN_AI][GEMINI] HTTP {exc.code} model={model} api={api_version} error={body}")
+                logger.warning(
+                    "[IMAN_AI][GEMINI] HTTP %s model=%s api=%s error=%s",
+                    exc.code,
+                    model,
+                    api_version,
+                    body,
+                )
                 continue
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-                print(f"[IMAN_AI][GEMINI] request failed model={model} api={api_version}: {exc}")
+                logger.warning(
+                    "[IMAN_AI][GEMINI] request failed model=%s api=%s: %s",
+                    model,
+                    api_version,
+                    exc,
+                )
                 continue
 
     return None

@@ -32,7 +32,11 @@ def error_response(message, errors=None, status_code=status.HTTP_400_BAD_REQUEST
 
 
 def get_students_qs():
-    return User.objects.filter(role="student", is_iman_student=True).select_related("group").order_by("-points", "full_name")
+    return (
+        User.objects.filter(role="student", is_iman_student=True, is_active=True)
+        .select_related("group")
+        .order_by("-points", "full_name")
+    )
 
 
 def get_place(user, qs):
@@ -66,7 +70,7 @@ class GroupRatingsView(APIView):
             return error_response("Group not found", {"group": ["not found"]}, 404)
 
         students = list(
-            User.objects.filter(role="student", group_id=group_id, is_iman_student=True)
+            User.objects.filter(role="student", group_id=group_id, is_iman_student=True, is_active=True)
             .select_related("group")
             .order_by("-points", "full_name")
         )
@@ -106,7 +110,7 @@ class MyRatingsView(APIView):
 
         if user.group_id:
             group_qs = (
-                User.objects.filter(role="student", group_id=user.group_id, is_iman_student=True)
+                User.objects.filter(role="student", group_id=user.group_id, is_iman_student=True, is_active=True)
                 .select_related("group")
                 .order_by("-points", "full_name")
             )

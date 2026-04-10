@@ -11,6 +11,8 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 from pathlib import Path
+import ast
+import json
 import os
 import dj_database_url
 
@@ -47,16 +49,62 @@ def load_local_env(base_dir):
 
 load_local_env(BASE_DIR)
 
-SECRET_KEY = 'django-insecure-$df@^i_y!ajgzk_j1(0^692yup&^v!s0+41)g_v-a8j&e)u-#s'
+SECRET_KEY = os.environ.get(
+    "SECRET_KEY",
+    "django-insecure-$df@^i_y!ajgzk_j1(0^692yup&^v!s0+41)g_v-a8j&e)u-#s",
+)
 
-DEBUG = os.environ.get("DEBUG", "False") == "True"
+
+def get_env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+DEBUG = get_env_bool("DEBUG", False)
+
+
+def _clean_origin(value):
+    cleaned = str(value or "").strip().strip("'").strip('"').strip()
+    cleaned = cleaned.strip("[]")
+    return cleaned.rstrip("/")
+
 
 def get_env_list(name: str, default: str = ""):
-    raw = os.environ.get(name, default)
+    raw = os.environ.get(name)
+    if raw is None:
+        raw = default
+
+    text = str(raw or "").strip()
+    if not text:
+        return []
+
+    parsed_items = None
+
+    try:
+        loaded = json.loads(text)
+        if isinstance(loaded, list):
+            parsed_items = loaded
+    except json.JSONDecodeError:
+        parsed_items = None
+
+    if parsed_items is None and text.startswith("[") and text.endswith("]"):
+        try:
+            loaded = ast.literal_eval(text)
+            if isinstance(loaded, list):
+                parsed_items = loaded
+        except (ValueError, SyntaxError):
+            parsed_items = None
+
+    if parsed_items is None:
+        normalized = text.replace("\r", ",").replace("\n", ",").replace(";", ",")
+        parsed_items = normalized.split(",")
+
     values = []
-    for item in raw.split(","):
-        value = item.strip().rstrip("/")
-        if value:
+    for item in parsed_items:
+        value = _clean_origin(item)
+        if value and value not in values:
             values.append(value)
     return values
 
@@ -64,7 +112,24 @@ def get_env_list(name: str, default: str = ""):
 ALLOWED_HOSTS = get_env_list("ALLOWED_HOSTS", "127.0.0.1,localhost")
 CSRF_TRUSTED_ORIGINS = get_env_list("CSRF_TRUSTED_ORIGINS")
 CORS_ALLOWED_ORIGINS = get_env_list("CORS_ALLOWED_ORIGINS")
+CORS_ALLOW_ALL_ORIGINS = get_env_bool("CORS_ALLOW_ALL_ORIGINS", False)
+CORS_ALLOW_CREDENTIALS = get_env_bool("CORS_ALLOW_CREDENTIALS", True)
 CORS_ALLOWED_ORIGIN_REGEXES = [r"^https://.*\.vercel\.app$"]
+
+# Security hardening (safe defaults for production)
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SECURE_SSL_REDIRECT = get_env_bool("SECURE_SSL_REDIRECT", not DEBUG)
+SESSION_COOKIE_SECURE = get_env_bool("SESSION_COOKIE_SECURE", not DEBUG)
+CSRF_COOKIE_SECURE = get_env_bool("CSRF_COOKIE_SECURE", not DEBUG)
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = os.environ.get("SESSION_COOKIE_SAMESITE", "Lax")
+CSRF_COOKIE_SAMESITE = os.environ.get("CSRF_COOKIE_SAMESITE", "Lax")
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = "DENY"
+SECURE_REFERRER_POLICY = os.environ.get("SECURE_REFERRER_POLICY", "same-origin")
+SECURE_HSTS_SECONDS = int(os.environ.get("SECURE_HSTS_SECONDS", "0" if DEBUG else "31536000"))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = get_env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", not DEBUG)
+SECURE_HSTS_PRELOAD = get_env_bool("SECURE_HSTS_PRELOAD", not DEBUG)
 
 # Guaranteed production frontend origin (Vercel).
 VERCEL_FRONTEND_ORIGIN = "https://iman-bakhruz.vercel.app"

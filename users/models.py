@@ -2,11 +2,28 @@
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 
 
+def _normalize_phone(value):
+    phone = str(value or "").strip()
+    digits = "".join(ch for ch in phone if ch.isdigit())
+
+    if len(digits) == 10 and digits.startswith("0"):
+        digits = digits[1:]
+
+    if len(digits) == 9:
+        return f"+998{digits}"
+
+    if digits.startswith("998") and len(digits) >= 12:
+        return f"+998{digits[3:12]}"
+
+    return phone
+
+
 class UserManager(BaseUserManager):
     def create_user(self, phone, password=None, **extra_fields):
         if not phone:
             raise ValueError("Phone is required")
-        phone = phone.strip()
+        phone = _normalize_phone(phone)
+        extra_fields.setdefault("role", "student")
         user = self.model(phone=phone, username=phone, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
@@ -46,6 +63,8 @@ class User(AbstractUser):
     phone = models.CharField(max_length=20, unique=True)
     avatar = models.FileField(upload_to="avatars/", blank=True, null=True)
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    is_paid = models.BooleanField(default=False)
+    paid_until = models.DateTimeField(blank=True, null=True)
 
     points = models.DecimalField(max_digits=8, decimal_places=2, default=0)
     group = models.ForeignKey(
@@ -178,4 +197,71 @@ class FriendlyMessage(models.Model):
 
     def __str__(self):
         return f"Friendly message #{self.id} ({self.sender_id})"
+
+
+class HomeworkTask(models.Model):
+    teacher = models.ForeignKey("users.User", on_delete=models.CASCADE, related_name="homework_tasks")
+    group = models.ForeignKey("groups.Group", on_delete=models.CASCADE, related_name="homework_tasks")
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    due_at = models.DateTimeField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Homework task #{self.id} ({self.group_id})"
+
+
+class HomeworkSubmission(models.Model):
+    STATUS_CHOICES = (
+        ("submitted", "Submitted"),
+        ("reviewed", "Reviewed"),
+    )
+
+    task = models.ForeignKey(HomeworkTask, on_delete=models.CASCADE, related_name="submissions")
+    student = models.ForeignKey("users.User", on_delete=models.CASCADE, related_name="homework_submissions")
+    answer_text = models.TextField(max_length=4000)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="submitted")
+    teacher_comment = models.TextField(max_length=2000, blank=True)
+    score = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        unique_together = ("task", "student")
+
+    def __str__(self):
+        return f"Homework submission #{self.id} ({self.student_id} -> {self.task_id})"
+
+
+class PaymentTransaction(models.Model):
+    PROVIDER_CHOICES = (
+        ("payme", "Payme"),
+        ("click", "Click"),
+    )
+    STATUS_CHOICES = (
+        ("pending", "Pending"),
+        ("paid", "Paid"),
+        ("failed", "Failed"),
+    )
+
+    user = models.ForeignKey("users.User", on_delete=models.CASCADE, related_name="payment_transactions")
+    provider = models.CharField(max_length=20, choices=PROVIDER_CHOICES)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    external_id = models.CharField(max_length=255, blank=True, null=True)
+    checkout_url = models.URLField(max_length=1500, blank=True)
+    payload_raw = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    paid_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.provider} #{self.id} ({self.status})"
 

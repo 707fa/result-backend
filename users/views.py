@@ -1,26 +1,47 @@
 ﻿import base64
 import binascii
+import hmac
+import json
+import logging
+import os
 import re
 import uuid
-from decimal import Decimal
+from base64 import b64encode
+from decimal import Decimal, InvalidOperation
+from urllib.parse import quote
 
+from django.conf import settings
 from django.contrib.auth import authenticate
 from django.db import transaction
 from django.db.models import F
 from django.db.models import Count
 from django.core.files.base import ContentFile
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 
 from rest_framework.views import APIView
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from groups.models import Group
 from ratings.models import ScoreLog
-from .models import User, GrammarTopic, SupportTicket, AiConversation, AiMessage, FriendlyConversation, FriendlyMessage
+from .models import (
+    User,
+    GrammarTopic,
+    SupportTicket,
+    AiConversation,
+    AiMessage,
+    FriendlyConversation,
+    FriendlyMessage,
+    HomeworkTask,
+    HomeworkSubmission,
+    PaymentTransaction,
+)
 from .ai_service import generate_iman_ai_reply
+from .permissions import IsAuthenticatedAndPaid
+from .subscription import get_subscription_payload, grant_subscription
 from .serializers import (
     RegisterSerializer,
     LoginSerializer,
@@ -42,7 +63,20 @@ from .serializers import (
     FriendlyConversationCreateSerializer,
     FriendlyMessageSerializer,
     FriendlySendMessageSerializer,
+    HomeworkTaskSerializer,
+    HomeworkTaskCreateSerializer,
+    HomeworkSubmissionSerializer,
+    HomeworkSubmissionCreateSerializer,
+    HomeworkSubmissionReviewSerializer,
+    PaymentCreateSerializer,
+    PaymentTransactionSerializer,
 )
+
+
+logger = logging.getLogger(__name__)
+
+ALLOWED_AI_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+DEFAULT_AI_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
 
 def success_response(message, data=None, status_code=status.HTTP_200_OK):
@@ -69,6 +103,7 @@ def error_response(message, errors=None, status_code=status.HTTP_400_BAD_REQUEST
 
 def build_auth_payload(user, refresh, request):
     me = MeSerializer(user, context={"request": request}).data
+    subscription = get_subscription_payload(user)
     return {
         "accessToken": str(refresh.access_token),
         "refreshToken": str(refresh),
@@ -76,6 +111,7 @@ def build_auth_payload(user, refresh, request):
         "role": user.role,
         "userId": str(user.id),
         "user": me,
+        "subscription": subscription,
     }
 
 
@@ -101,6 +137,38 @@ def normalize_register_payload(data):
         payload["group_id"] = payload.get("groupId")
 
     return payload
+
+
+def get_env_int(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def build_ai_unavailable_reply(text, has_image):
+    if has_image and text:
+        return (
+            "AI service is temporarily unavailable. I saved your photo and message.\n"
+            "Please try again in 1-2 minutes.\n"
+            f"Your message: {text}"
+        )
+    if has_image:
+        return (
+            "AI service is temporarily unavailable. I received your photo. "
+            "Please send a short text with what to check and try again in 1-2 minutes."
+        )
+    if text:
+        return (
+            "AI service is temporarily unavailable. "
+            "Please try again in 1-2 minutes.\n"
+            f"Your message: {text}"
+        )
+    return "AI service is temporarily unavailable. Send text or homework photo and try again."
 
 
 def avatar_url(request, user):
@@ -145,6 +213,8 @@ def to_front_student(request, student, include_phone=True):
         "groupId": str(student.group_id) if student.group_id else "",
         "avatarUrl": avatar_url(request, student),
         "points": float(student.points),
+        "isPaid": bool(student.is_paid),
+        "paidUntil": student.paid_until.isoformat() if student.paid_until else None,
         "progress": build_progress_block(student),
         "statusBadge": student.status_badge,
     }
@@ -251,12 +321,15 @@ def save_ai_image_from_data_url(image_base64, user):
     if not image_base64:
         return None
 
-    raw_avatar = image_base64.strip()
+    raw_avatar = str(image_base64).strip()
     match = re.match(r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.+)$", raw_avatar)
     if not match:
-        return None
+        raise ValueError("Invalid image format. Use base64 data URL.")
 
-    mime_type = match.group(1)
+    mime_type = match.group(1).lower()
+    if mime_type not in ALLOWED_AI_IMAGE_MIME_TYPES:
+        raise ValueError("Only JPG, PNG, and WEBP images are supported.")
+
     encoded = match.group(2)
     extension = "png"
     if "/" in mime_type:
@@ -265,9 +338,14 @@ def save_ai_image_from_data_url(image_base64, user):
         extension = "jpg"
 
     try:
-        decoded = base64.b64decode(encoded)
+        decoded = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError):
-        return None
+        raise ValueError("Invalid image data.")
+
+    max_bytes = get_env_int("AI_MAX_IMAGE_BYTES", DEFAULT_AI_MAX_IMAGE_BYTES)
+    if len(decoded) > max_bytes:
+        max_mb = round(max_bytes / (1024 * 1024), 2)
+        raise ValueError(f"Image is too large. Max size is {max_mb} MB.")
 
     filename = f"{uuid.uuid4().hex}_{user.id}.{extension}"
     content = ContentFile(decoded)
@@ -330,7 +408,7 @@ class LoginView(APIView):
 
 
 class MeView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedAndPaid]
 
     def get(self, request):
         data = MeSerializer(request.user, context={"request": request}).data
@@ -338,7 +416,7 @@ class MeView(APIView):
 
 
 class UserProfileDetailView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedAndPaid]
 
     def get(self, request, user_id):
         target = get_object_or_404(User.objects.select_related("group", "group__teacher"), id=user_id)
@@ -357,7 +435,7 @@ class UserProfileDetailView(APIView):
 
 
 class ProgressMeView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedAndPaid]
 
     def get(self, request):
         data = {
@@ -369,7 +447,7 @@ class ProgressMeView(APIView):
 
 
 class TeacherStudentProgressView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedAndPaid]
 
     def get(self, request, student_id):
         if request.user.role != "teacher":
@@ -423,7 +501,7 @@ class TeacherStudentProgressView(APIView):
 
 
 class UpdateAvatarView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedAndPaid]
 
     def patch(self, request):
         raw_avatar = request.data.get("avatarUrl")
@@ -482,17 +560,433 @@ class LogoutView(APIView):
         return success_response("Logout successful", {})
 
 
-class PlatformStateView(APIView):
-    permission_classes = [IsAuthenticated]
+class HealthView(APIView):
+    permission_classes = [AllowAny]
 
     def get(self, request):
+        db_ok = True
+        try:
+            User.objects.exists()
+        except Exception:
+            db_ok = False
+
+        ai_provider = (os.environ.get("AI_PROVIDER", "gemini") or "gemini").strip().lower()
+        ai_configured = bool(
+            os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("GOOGLE_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+        )
+
+        data = {
+            "status": "ok" if db_ok else "degraded",
+            "database": db_ok,
+            "aiProvider": ai_provider,
+            "aiConfigured": ai_configured,
+        }
+        return success_response("Health check", data)
+
+
+def get_subscription_price():
+    raw = os.environ.get("SUBSCRIPTION_PRICE_UZS", "99000").strip()
+    try:
+        value = Decimal(raw)
+    except (InvalidOperation, ValueError, TypeError):
+        value = Decimal("99000")
+    value = max(value, Decimal("0"))
+    return value.quantize(Decimal("0.01"))
+
+
+def get_subscription_days():
+    raw = str(os.environ.get("SUBSCRIPTION_DAYS", "30") or "30").strip()
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        days = 30
+    return max(1, min(days, 365))
+
+
+def resolve_payment_return_url():
+    candidate = (
+        os.environ.get("PAYMENT_RETURN_URL")
+        or os.environ.get("FRONTEND_BASE_URL")
+        or "http://127.0.0.1:5188/student/subscription"
+    )
+    url = str(candidate or "").strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return "http://127.0.0.1:5188/student/subscription"
+    return url
+
+
+def is_provider_configured(provider):
+    provider_name = str(provider or "").strip().lower()
+    if provider_name == "payme":
+        return bool((os.environ.get("PAYME_MERCHANT_ID") or "").strip())
+    if provider_name == "click":
+        return bool((os.environ.get("CLICK_SERVICE_ID") or "").strip() and (os.environ.get("CLICK_MERCHANT_ID") or "").strip())
+    return False
+
+
+def parse_transaction_id(raw_value):
+    raw = str(raw_value or "").strip()
+    if not raw.isdigit():
+        return None
+    return int(raw)
+
+
+def parse_decimal_value(raw_value):
+    if raw_value is None:
+        return None
+    try:
+        text = str(raw_value).strip().replace(" ", "")
+        if not text:
+            return None
+        return Decimal(text)
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def amount_matches_transaction(transaction_amount, payload_amount):
+    if payload_amount is None:
+        return True
+
+    tx_value = Decimal(transaction_amount).quantize(Decimal("0.01"))
+    payload_value = Decimal(payload_amount).quantize(Decimal("0.01"))
+    candidates = {payload_value}
+
+    if payload_value == payload_value.to_integral_value():
+        candidates.add((payload_value / Decimal("100")).quantize(Decimal("0.01")))
+
+    return tx_value in candidates
+
+
+def normalize_webhook_payload(payload):
+    try:
+        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        serialized = "{}"
+    return serialized[:12000]
+
+
+def build_payme_checkout_url(transaction, return_url):
+    merchant_id = (os.environ.get("PAYME_MERCHANT_ID") or "").strip()
+    if not merchant_id:
+        return ""
+
+    amount_tiyin = int((transaction.amount * 100).quantize(Decimal("1")))
+    params = (
+        f"m={merchant_id};"
+        f"ac.user_id={transaction.user_id};"
+        f"ac.tx={transaction.id};"
+        f"a={amount_tiyin};"
+        f"c={return_url};"
+        f"ct=900000"
+    )
+    encoded = b64encode(params.encode("utf-8")).decode("ascii")
+    return f"https://checkout.paycom.uz/{encoded}"
+
+
+def build_click_checkout_url(transaction, return_url):
+    service_id = (os.environ.get("CLICK_SERVICE_ID") or "").strip()
+    merchant_id = (os.environ.get("CLICK_MERCHANT_ID") or "").strip()
+    if not service_id or not merchant_id:
+        return ""
+
+    amount = str(transaction.amount.quantize(Decimal("0.01")))
+    return (
+        "https://my.click.uz/services/pay"
+        f"?service_id={quote(service_id)}"
+        f"&merchant_id={quote(merchant_id)}"
+        f"&amount={quote(amount)}"
+        f"&transaction_param={transaction.id}"
+        f"&return_url={quote(return_url)}"
+    )
+
+
+def parse_payme_webhook_payload(payload):
+    tx_id = None
+    success = False
+    external_id = None
+    amount = None
+
+    if isinstance(payload, dict):
+        tx_id = payload.get("transaction_id")
+        status_value = str(payload.get("status", "")).lower()
+        success = status_value in {"success", "paid", "ok"}
+        amount = parse_decimal_value(payload.get("amount"))
+        result = payload.get("result")
+        if isinstance(result, dict):
+            amount = amount or parse_decimal_value(result.get("amount"))
+            tx_id = tx_id or result.get("merchant_trans_id") or result.get("transaction_id")
+            external_id = external_id or result.get("id")
+            state = str(result.get("state", "")).lower()
+            if state in {"2", "paid", "success"}:
+                success = True
+        params = payload.get("params")
+        if isinstance(params, dict):
+            state = str(params.get("state", "")).lower()
+            if state in {"2", "paid", "success"}:
+                success = True
+            amount = amount or parse_decimal_value(params.get("amount"))
+            account = params.get("account")
+            if isinstance(account, dict):
+                tx_id = tx_id or account.get("tx") or account.get("transaction_id")
+        external_id = external_id or payload.get("id") or payload.get("payment_id")
+
+    return parse_transaction_id(tx_id), success, str(external_id or "").strip(), amount
+
+
+def parse_click_webhook_payload(payload):
+    tx_id = None
+    success = False
+    external_id = None
+    amount = None
+
+    if isinstance(payload, dict):
+        tx_id = payload.get("transaction_id") or payload.get("merchant_trans_id")
+        error_code = str(payload.get("error", "")).strip()
+        status_value = str(payload.get("status", "")).lower()
+        success = error_code in {"0", ""} and status_value not in {"failed", "error"}
+        if status_value in {"success", "paid", "completed"}:
+            success = True
+        amount = parse_decimal_value(payload.get("amount"))
+        external_id = payload.get("click_trans_id") or payload.get("payment_id")
+
+    return parse_transaction_id(tx_id), success, str(external_id or "").strip(), amount
+
+
+def resolve_webhook_secret(request):
+    token = request.headers.get("X-Payment-Secret") or request.headers.get("X-Webhook-Secret")
+    return str(token or "").strip()
+
+
+def is_valid_webhook_secret(request):
+    configured = (os.environ.get("PAYMENT_WEBHOOK_SECRET") or "").strip()
+    if not configured:
+        return bool(getattr(settings, "DEBUG", False))
+    provided = resolve_webhook_secret(request)
+    if not provided:
+        return False
+    return hmac.compare_digest(provided, configured)
+
+
+def has_duplicate_external_id(provider, external_id, current_transaction_id):
+    if not external_id:
+        return False
+    return PaymentTransaction.objects.filter(
+        provider=provider,
+        external_id=external_id,
+    ).exclude(id=current_transaction_id).exists()
+
+
+class PaymentCreateView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def post(self, request):
+        if request.user.role != "student":
+            return error_response("Only students can create payment", {"role": ["student only"]}, status.HTTP_403_FORBIDDEN)
+
+        serializer = PaymentCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("Validation error", serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        provider = serializer.validated_data["provider"]
+        amount = get_subscription_price()
+
+        if amount <= 0:
+            return error_response(
+                "Subscription price is not configured",
+                {"subscription": ["Set SUBSCRIPTION_PRICE_UZS in backend env"]},
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        if not is_provider_configured(provider):
+            return error_response(
+                "Payment provider is not configured",
+                {"provider": ["Missing provider credentials in backend env"]},
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        payment_tx = PaymentTransaction.objects.create(
+            user=request.user,
+            provider=provider,
+            amount=amount,
+            status="pending",
+        )
+
+        return_url = resolve_payment_return_url()
+
+        checkout_url = (
+            build_payme_checkout_url(payment_tx, return_url)
+            if provider == "payme"
+            else build_click_checkout_url(payment_tx, return_url)
+        )
+
+        if not checkout_url:
+            payment_tx.status = "failed"
+            payment_tx.payload_raw = "Payment provider config missing"
+            payment_tx.save(update_fields=["status", "payload_raw"])
+            return error_response(
+                "Payment provider is not configured",
+                {"provider": ["Missing provider config in env"]},
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        payment_tx.checkout_url = checkout_url
+        payment_tx.save(update_fields=["checkout_url"])
+
+        payload = {
+            "transaction": PaymentTransactionSerializer(payment_tx).data,
+            "subscription": get_subscription_payload(request.user),
+        }
+        return success_response("Payment link created", payload, status.HTTP_201_CREATED)
+
+
+class PaymentStatusView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def get(self, request):
+        last_transaction = (
+            PaymentTransaction.objects.filter(user=request.user)
+            .order_by("-created_at")
+            .first()
+        )
+        payload = {
+            "subscription": get_subscription_payload(request.user),
+            "lastTransaction": PaymentTransactionSerializer(last_transaction).data if last_transaction else None,
+        }
+        return success_response("Payment status", payload)
+
+
+class PaymentWebhookPaymeView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        if not is_valid_webhook_secret(request):
+            return error_response("Unauthorized", {"secret": ["Invalid webhook secret"]}, status.HTTP_401_UNAUTHORIZED)
+
+        payload = request.data if isinstance(request.data, dict) else {}
+        tx_id, success, external_id, webhook_amount = parse_payme_webhook_payload(payload)
+        if not tx_id:
+            return error_response("Invalid payload", {"transaction": ["Missing transaction id"]}, status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            payment_tx = (
+                PaymentTransaction.objects.select_for_update()
+                .select_related("user")
+                .filter(id=tx_id, provider="payme")
+                .first()
+            )
+            if not payment_tx:
+                return error_response("Transaction not found", {"transaction": ["not found"]}, status.HTTP_404_NOT_FOUND)
+
+            if has_duplicate_external_id("payme", external_id, payment_tx.id):
+                return error_response(
+                    "Duplicate external payment id",
+                    {"payment": ["This payment id is already used"]},
+                    status.HTTP_409_CONFLICT,
+                )
+
+            payload_raw = normalize_webhook_payload(payload)
+            payment_tx.external_id = external_id or payment_tx.external_id
+            payment_tx.payload_raw = payload_raw
+
+            if success and not amount_matches_transaction(payment_tx.amount, webhook_amount):
+                if payment_tx.status != "paid":
+                    payment_tx.status = "failed"
+                payment_tx.save(update_fields=["status", "external_id", "payload_raw"])
+                return error_response(
+                    "Amount mismatch",
+                    {"payment": ["Webhook amount does not match transaction amount"]},
+                    status.HTTP_400_BAD_REQUEST,
+                )
+
+            if success:
+                was_paid = payment_tx.status == "paid"
+                payment_tx.status = "paid"
+                payment_tx.paid_at = payment_tx.paid_at or timezone.now()
+                payment_tx.save(update_fields=["status", "paid_at", "external_id", "payload_raw"])
+                if not was_paid:
+                    grant_subscription(payment_tx.user, days=get_subscription_days())
+            else:
+                if payment_tx.status != "paid":
+                    payment_tx.status = "failed"
+                payment_tx.save(update_fields=["status", "external_id", "payload_raw"])
+
+        return success_response("Webhook accepted", {"transactionId": payment_tx.id, "status": payment_tx.status})
+
+
+class PaymentWebhookClickView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        if not is_valid_webhook_secret(request):
+            return error_response("Unauthorized", {"secret": ["Invalid webhook secret"]}, status.HTTP_401_UNAUTHORIZED)
+
+        payload = request.data if isinstance(request.data, dict) else {}
+        tx_id, success, external_id, webhook_amount = parse_click_webhook_payload(payload)
+        if not tx_id:
+            return error_response("Invalid payload", {"transaction": ["Missing transaction id"]}, status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            payment_tx = (
+                PaymentTransaction.objects.select_for_update()
+                .select_related("user")
+                .filter(id=tx_id, provider="click")
+                .first()
+            )
+            if not payment_tx:
+                return error_response("Transaction not found", {"transaction": ["not found"]}, status.HTTP_404_NOT_FOUND)
+
+            if has_duplicate_external_id("click", external_id, payment_tx.id):
+                return error_response(
+                    "Duplicate external payment id",
+                    {"payment": ["This payment id is already used"]},
+                    status.HTTP_409_CONFLICT,
+                )
+
+            payload_raw = normalize_webhook_payload(payload)
+            payment_tx.external_id = external_id or payment_tx.external_id
+            payment_tx.payload_raw = payload_raw
+
+            if success and not amount_matches_transaction(payment_tx.amount, webhook_amount):
+                if payment_tx.status != "paid":
+                    payment_tx.status = "failed"
+                payment_tx.save(update_fields=["status", "external_id", "payload_raw"])
+                return error_response(
+                    "Amount mismatch",
+                    {"payment": ["Webhook amount does not match transaction amount"]},
+                    status.HTTP_400_BAD_REQUEST,
+                )
+
+            if success:
+                was_paid = payment_tx.status == "paid"
+                payment_tx.status = "paid"
+                payment_tx.paid_at = payment_tx.paid_at or timezone.now()
+                payment_tx.save(update_fields=["status", "paid_at", "external_id", "payload_raw"])
+                if not was_paid:
+                    grant_subscription(payment_tx.user, days=get_subscription_days())
+            else:
+                if payment_tx.status != "paid":
+                    payment_tx.status = "failed"
+                payment_tx.save(update_fields=["status", "external_id", "payload_raw"])
+
+        return success_response("Webhook accepted", {"transactionId": payment_tx.id, "status": payment_tx.status})
+
+
+class PlatformStateView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def get(self, request):
+        subscription = get_subscription_payload(request.user)
+        paid_access = bool(subscription.get("isPaid")) or request.user.role != "student"
+
         groups = list(
             Group.objects.select_related("teacher")
             .order_by("title", "time")
         )
 
         students = list(
-            User.objects.filter(role="student", is_iman_student=True)
+            User.objects.filter(role="student", is_iman_student=True, is_active=True)
             .select_related("group")
             .order_by("-points", "full_name")
         )
@@ -551,17 +1045,20 @@ class PlatformStateView(APIView):
                     teacher.teaching_groups.values_list("id", flat=True),
                 )
                 for teacher in teachers
-            ],
+            ]
+            if paid_access or request.user.role == "teacher"
+            else [],
             "groups": [to_front_group(group) for group in groups],
             "rankings": rankings,
-            "ratingLogs": rating_logs,
+            "ratingLogs": rating_logs if paid_access or request.user.role == "teacher" else [],
+            "subscription": subscription,
         }
 
         return success_response_with_compat("Platform state fetched successfully", payload)
 
 
 class TeacherDeactivateStudentView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedAndPaid]
 
     def patch(self, request, student_id):
         if request.user.role != "teacher":
@@ -585,7 +1082,7 @@ class TeacherDeactivateStudentView(APIView):
 
 
 class TeacherMyGroupsView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedAndPaid]
 
     def get(self, request):
         if request.user.role != "teacher":
@@ -607,7 +1104,7 @@ class TeacherMyGroupsView(APIView):
 
 
 class TeacherGroupStudentsView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedAndPaid]
 
     def get(self, request, group_id):
         if request.user.role != "teacher":
@@ -626,7 +1123,7 @@ class TeacherGroupStudentsView(APIView):
             )
 
         students = (
-            User.objects.filter(role="student", group=group, is_iman_student=True)
+            User.objects.filter(role="student", group=group, is_iman_student=True, is_active=True)
             .select_related("group")
             .order_by("-points", "full_name")
         )
@@ -645,7 +1142,7 @@ class TeacherGroupStudentsView(APIView):
 
 
 class TeacherScoreStudentView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedAndPaid]
 
     def post(self, request, group_id=None, student_id=None):
         if request.user.role != "teacher":
@@ -681,6 +1178,13 @@ class TeacherScoreStudentView(APIView):
                 "Student not found",
                 {"student": ["Student not found"]},
                 status.HTTP_404_NOT_FOUND,
+            )
+
+        if not student.is_active or not student.is_iman_student:
+            return error_response(
+                "Student is inactive",
+                {"student": ["Inactive students cannot be scored"]},
+                status.HTTP_400_BAD_REQUEST,
             )
 
         if not student.group:
@@ -729,7 +1233,7 @@ class TeacherScoreStudentView(APIView):
 
 
 class TeacherScoreHistoryView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedAndPaid]
 
     def get(self, request):
         if request.user.role != "teacher":
@@ -758,8 +1262,175 @@ class TeacherScoreHistoryView(APIView):
         return success_response("Teacher score history fetched successfully", data)
 
 
+class TeacherHomeworkTasksView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def get(self, request):
+        if request.user.role != "teacher":
+            return error_response("Only teachers can access homework tasks", {"role": ["teacher only"]}, status.HTTP_403_FORBIDDEN)
+
+        tasks = (
+            HomeworkTask.objects.filter(teacher=request.user, is_active=True)
+            .select_related("teacher", "group")
+            .order_by("-created_at")
+        )
+        group_id = request.query_params.get("group_id")
+        if group_id:
+            tasks = tasks.filter(group_id=group_id)
+
+        data = HomeworkTaskSerializer(tasks, many=True).data
+        return success_response("Homework tasks fetched", {"tasks": data})
+
+    def post(self, request):
+        if request.user.role != "teacher":
+            return error_response("Only teachers can create homework tasks", {"role": ["teacher only"]}, status.HTTP_403_FORBIDDEN)
+
+        serializer = HomeworkTaskCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("Validation error", serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        group_id = serializer.validated_data["group_id"]
+        group = Group.objects.filter(id=group_id, teacher=request.user).first()
+        if not group:
+            return error_response("Group not found or access denied", {"group_id": ["Invalid group"]}, status.HTTP_404_NOT_FOUND)
+
+        task = HomeworkTask.objects.create(
+            teacher=request.user,
+            group=group,
+            title=serializer.validated_data["title"],
+            description=serializer.validated_data.get("description", "") or "",
+            due_at=serializer.validated_data.get("due_at"),
+        )
+        data = HomeworkTaskSerializer(task).data
+        return success_response("Homework task created", {"task": data}, status.HTTP_201_CREATED)
+
+
+class TeacherHomeworkTaskSubmissionsView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def get(self, request, task_id):
+        if request.user.role != "teacher":
+            return error_response("Only teachers can access submissions", {"role": ["teacher only"]}, status.HTTP_403_FORBIDDEN)
+
+        task = HomeworkTask.objects.select_related("group", "teacher").filter(id=task_id, teacher=request.user).first()
+        if not task:
+            return error_response("Task not found or access denied", {"task": ["Task not found"]}, status.HTTP_404_NOT_FOUND)
+
+        submissions = task.submissions.select_related("student", "student__group").order_by("-updated_at")
+        data = {
+            "task": HomeworkTaskSerializer(task).data,
+            "submissions": HomeworkSubmissionSerializer(submissions, many=True).data,
+        }
+        return success_response("Homework submissions fetched", data)
+
+
+class TeacherHomeworkSubmissionReviewView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def patch(self, request, submission_id):
+        if request.user.role != "teacher":
+            return error_response("Only teachers can review submissions", {"role": ["teacher only"]}, status.HTTP_403_FORBIDDEN)
+
+        submission = (
+            HomeworkSubmission.objects.select_related("task", "task__teacher", "student")
+            .filter(id=submission_id)
+            .first()
+        )
+        if not submission or submission.task.teacher_id != request.user.id:
+            return error_response("Submission not found or access denied", {"submission": ["Not found"]}, status.HTTP_404_NOT_FOUND)
+
+        serializer = HomeworkSubmissionReviewSerializer(data=request.data, partial=True)
+        if not serializer.is_valid():
+            return error_response("Validation error", serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        changed_fields = []
+        if "status" in serializer.validated_data:
+            submission.status = serializer.validated_data["status"]
+            changed_fields.append("status")
+        if "teacher_comment" in serializer.validated_data:
+            submission.teacher_comment = serializer.validated_data["teacher_comment"] or ""
+            changed_fields.append("teacher_comment")
+        if "score" in serializer.validated_data:
+            submission.score = serializer.validated_data["score"]
+            changed_fields.append("score")
+
+        if changed_fields:
+            changed_fields.append("updated_at")
+            submission.save(update_fields=changed_fields)
+
+        data = HomeworkSubmissionSerializer(submission).data
+        return success_response("Submission reviewed", {"submission": data})
+
+
+class StudentHomeworkTasksView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def get(self, request):
+        if request.user.role != "student":
+            return error_response("Only students can access homework tasks", {"role": ["student only"]}, status.HTTP_403_FORBIDDEN)
+
+        if not request.user.group_id:
+            return success_response("Homework tasks fetched", {"tasks": []})
+
+        tasks = (
+            HomeworkTask.objects.filter(group_id=request.user.group_id, is_active=True)
+            .select_related("teacher", "group")
+            .order_by("-created_at")
+        )
+        submissions_map = {
+            submission.task_id: submission
+            for submission in HomeworkSubmission.objects.filter(task__in=tasks, student=request.user).select_related("task")
+        }
+
+        payload = []
+        for task in tasks:
+            task_data = HomeworkTaskSerializer(task).data
+            submission = submissions_map.get(task.id)
+            task_data["my_submission"] = HomeworkSubmissionSerializer(submission).data if submission else None
+            payload.append(task_data)
+
+        return success_response("Homework tasks fetched", {"tasks": payload})
+
+
+class StudentHomeworkSubmitView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def post(self, request, task_id):
+        if request.user.role != "student":
+            return error_response("Only students can submit homework", {"role": ["student only"]}, status.HTTP_403_FORBIDDEN)
+
+        if not request.user.group_id:
+            return error_response("Student has no group", {"group": ["No group"]}, status.HTTP_400_BAD_REQUEST)
+
+        task = HomeworkTask.objects.select_related("group", "teacher").filter(id=task_id, is_active=True).first()
+        if not task:
+            return error_response("Task not found", {"task": ["Task not found"]}, status.HTTP_404_NOT_FOUND)
+        if task.group_id != request.user.group_id:
+            return error_response("Task is not available for your group", {"task": ["Group mismatch"]}, status.HTTP_403_FORBIDDEN)
+
+        serializer = HomeworkSubmissionCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("Validation error", serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        submission, created = HomeworkSubmission.objects.get_or_create(
+            task=task,
+            student=request.user,
+            defaults={
+                "answer_text": serializer.validated_data["answer_text"],
+                "status": "submitted",
+            },
+        )
+        if not created:
+            submission.answer_text = serializer.validated_data["answer_text"]
+            submission.status = "submitted"
+            submission.save(update_fields=["answer_text", "status", "updated_at"])
+
+        data = HomeworkSubmissionSerializer(submission).data
+        return success_response("Homework submitted", {"submission": data}, status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
 class AiChatMessagesView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedAndPaid]
 
     def get(self, request):
         conversation, _ = AiConversation.objects.get_or_create(user=request.user)
@@ -781,12 +1452,25 @@ class AiChatMessagesView(APIView):
             text=text,
         )
 
-        saved_image = save_ai_image_from_data_url(image_base64, request.user)
+        try:
+            saved_image = save_ai_image_from_data_url(image_base64, request.user)
+        except ValueError as exc:
+            return error_response(
+                "Validation error",
+                {"imageBase64": [str(exc)]},
+                status.HTTP_400_BAD_REQUEST,
+            )
+
         if saved_image:
             filename, content = saved_image
             user_message.image.save(filename, content, save=True)
 
-        reply = generate_iman_ai_reply(text=text, image_data_url=image_base64)
+        try:
+            reply = generate_iman_ai_reply(text=text, image_data_url=image_base64)
+        except Exception:
+            logger.exception("[IMAN_AI] unexpected provider failure")
+            reply = build_ai_unavailable_reply(text, bool(image_base64))
+
         assistant_message = AiMessage.objects.create(
             conversation=conversation,
             role="assistant",
@@ -805,7 +1489,7 @@ class AiChatMessagesView(APIView):
 
 
 class FriendlyConversationsView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedAndPaid]
 
     def get(self, request):
         conversations = (
@@ -832,7 +1516,7 @@ class FriendlyConversationsView(APIView):
 
 
 class FriendlyConversationMessagesView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedAndPaid]
 
     def get(self, request, conversation_id):
         conversation = get_object_or_404(
@@ -862,7 +1546,7 @@ class FriendlyConversationMessagesView(APIView):
 
 
 class GrammarTopicsView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedAndPaid]
 
     def get(self, request):
         topics = GrammarTopic.objects.filter(is_active=True).select_related("created_by")
@@ -883,7 +1567,7 @@ class GrammarTopicsView(APIView):
 
 
 class SupportTicketListCreateView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedAndPaid]
 
     def get(self, request):
         if request.user.role == "teacher":
@@ -916,7 +1600,7 @@ class SupportTicketListCreateView(APIView):
 
 
 class SupportTicketUpdateView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticatedAndPaid]
 
     def patch(self, request, ticket_id):
         if request.user.role != "teacher":
@@ -930,3 +1614,4 @@ class SupportTicketUpdateView(APIView):
         serializer.save()
         data = SupportTicketSerializer(ticket).data
         return success_response("Support request updated", data)
+

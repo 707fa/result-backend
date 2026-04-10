@@ -3,6 +3,7 @@ from .views import (
     RegisterView,
     LoginView,
     LogoutView,
+    HealthView,
     PlatformStateView,
     MeView,
     UserProfileDetailView,
@@ -20,9 +21,23 @@ from .views import (
     GrammarTopicsView,
     SupportTicketListCreateView,
     SupportTicketUpdateView,
+    PaymentCreateView,
+    PaymentStatusView,
+    PaymentWebhookPaymeView,
+    PaymentWebhookClickView,
+    TeacherHomeworkTasksView,
+    TeacherHomeworkTaskSubmissionsView,
+    TeacherHomeworkSubmissionReviewView,
+    StudentHomeworkTasksView,
+    StudentHomeworkSubmitView,
 )
 
 urlpatterns = [
+    path("health", HealthView.as_view(), name="health"),
+    path("payments/create", PaymentCreateView.as_view(), name="payments-create"),
+    path("payments/status", PaymentStatusView.as_view(), name="payments-status"),
+    path("payments/webhook/payme", PaymentWebhookPaymeView.as_view(), name="payments-webhook-payme"),
+    path("payments/webhook/click", PaymentWebhookClickView.as_view(), name="payments-webhook-click"),
     path("auth/register", RegisterView.as_view(), name="register"),
     path("auth/login", LoginView.as_view(), name="login"),
     path("auth/logout", LogoutView.as_view(), name="logout"),
@@ -54,4 +69,11 @@ urlpatterns = [
 
     path("support/tickets", SupportTicketListCreateView.as_view(), name="support-tickets"),
     path("support/tickets/<int:ticket_id>", SupportTicketUpdateView.as_view(), name="support-ticket-update"),
+
+    path("teacher/homework/tasks", TeacherHomeworkTasksView.as_view(), name="teacher-homework-tasks"),
+    path("teacher/homework/tasks/<int:task_id>/submissions", TeacherHomeworkTaskSubmissionsView.as_view(), name="teacher-homework-task-submissions"),
+    path("teacher/homework/submissions/<int:submission_id>", TeacherHomeworkSubmissionReviewView.as_view(), name="teacher-homework-submission-review"),
+
+    path("student/homework/tasks", StudentHomeworkTasksView.as_view(), name="student-homework-tasks"),
+    path("student/homework/tasks/<int:task_id>/submit", StudentHomeworkSubmitView.as_view(), name="student-homework-submit"),
 ]
