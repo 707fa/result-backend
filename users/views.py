@@ -71,6 +71,7 @@ from .serializers import (
     PaymentCreateSerializer,
     PaymentTransactionSerializer,
     TeacherGrantSubscriptionSerializer,
+    TeacherPaymentDecisionSerializer,
     TeacherRenameGroupSerializer,
 )
 
@@ -621,6 +622,8 @@ def resolve_payment_return_url():
 
 def is_provider_configured(provider):
     provider_name = str(provider or "").strip().lower()
+    if provider_name == "manual":
+        return True
     if provider_name == "payme":
         return bool((os.environ.get("PAYME_MERCHANT_ID") or "").strip())
     if provider_name == "click":
@@ -815,6 +818,16 @@ class PaymentCreateView(APIView):
             status="pending",
         )
 
+        if provider == "manual":
+            payment_tx.payload_raw = "manual_payment_request"
+            payment_tx.save(update_fields=["payload_raw"])
+            payload = {
+                "transaction": PaymentTransactionSerializer(payment_tx).data,
+                "subscription": get_subscription_payload(request.user),
+                "manualFlow": True,
+            }
+            return success_response("Manual payment request created", payload, status.HTTP_201_CREATED)
+
         return_url = resolve_payment_return_url()
 
         checkout_url = (
@@ -857,6 +870,119 @@ class PaymentStatusView(APIView):
             "lastTransaction": PaymentTransactionSerializer(last_transaction).data if last_transaction else None,
         }
         return success_response("Payment status", payload)
+
+
+def serialize_teacher_payment_request_item(payment_tx):
+    student = payment_tx.user
+    group = getattr(student, "group", None)
+    return {
+        "transaction": PaymentTransactionSerializer(payment_tx).data,
+        "student": {
+            "id": student.id,
+            "fullName": student.full_name,
+            "phone": student.phone,
+            "groupId": group.id if group else None,
+            "groupTitle": group.title if group else None,
+            "groupTime": group.time if group else None,
+        },
+    }
+
+
+class TeacherPaymentRequestsView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def get(self, request):
+        if request.user.role != "teacher":
+            return error_response("Only teachers can view payment requests", {"role": ["teacher only"]}, status.HTTP_403_FORBIDDEN)
+
+        qs = (
+            PaymentTransaction.objects.select_related("user", "user__group")
+            .filter(provider="manual", user__role="student", user__group__teacher=request.user, status="pending")
+            .order_by("-created_at")
+        )
+        payload = {
+            "requests": [serialize_teacher_payment_request_item(item) for item in qs],
+        }
+        return success_response("Teacher payment requests", payload)
+
+
+class TeacherPaymentRequestApproveView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def post(self, request, transaction_id):
+        if request.user.role != "teacher":
+            return error_response("Only teachers can approve payment requests", {"role": ["teacher only"]}, status.HTTP_403_FORBIDDEN)
+
+        serializer = TeacherPaymentDecisionSerializer(data=request.data or {})
+        if not serializer.is_valid():
+            return error_response("Validation error", serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        days = serializer.validated_data.get("days", get_subscription_days())
+
+        with transaction.atomic():
+            payment_tx = (
+                PaymentTransaction.objects.select_for_update()
+                .select_related("user", "user__group")
+                .filter(
+                    id=transaction_id,
+                    provider="manual",
+                    status="pending",
+                    user__role="student",
+                    user__group__teacher=request.user,
+                )
+                .first()
+            )
+            if not payment_tx:
+                return error_response(
+                    "Payment request not found",
+                    {"transaction": ["Payment request not found or already processed"]},
+                    status.HTTP_404_NOT_FOUND,
+                )
+
+            payment_tx.status = "paid"
+            payment_tx.paid_at = timezone.now()
+            payment_tx.save(update_fields=["status", "paid_at"])
+            paid_until = grant_subscription(payment_tx.user, days=days)
+
+        payload = {
+            "request": serialize_teacher_payment_request_item(payment_tx),
+            "paidUntil": paid_until.isoformat(),
+        }
+        return success_response("Payment request approved", payload)
+
+
+class TeacherPaymentRequestRejectView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def post(self, request, transaction_id):
+        if request.user.role != "teacher":
+            return error_response("Only teachers can reject payment requests", {"role": ["teacher only"]}, status.HTTP_403_FORBIDDEN)
+
+        with transaction.atomic():
+            payment_tx = (
+                PaymentTransaction.objects.select_for_update()
+                .select_related("user", "user__group")
+                .filter(
+                    id=transaction_id,
+                    provider="manual",
+                    status="pending",
+                    user__role="student",
+                    user__group__teacher=request.user,
+                )
+                .first()
+            )
+            if not payment_tx:
+                return error_response(
+                    "Payment request not found",
+                    {"transaction": ["Payment request not found or already processed"]},
+                    status.HTTP_404_NOT_FOUND,
+                )
+
+            payment_tx.status = "failed"
+            payment_tx.save(update_fields=["status"])
+
+        payload = {"request": serialize_teacher_payment_request_item(payment_tx)}
+        return success_response("Payment request rejected", payload)
 
 
 class PaymentWebhookPaymeView(APIView):

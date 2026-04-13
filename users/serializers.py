@@ -546,10 +546,14 @@ class HomeworkSubmissionReviewSerializer(serializers.Serializer):
 
 
 class PaymentCreateSerializer(serializers.Serializer):
-    provider = serializers.ChoiceField(choices=["payme", "click"])
+    provider = serializers.ChoiceField(choices=["payme", "click", "manual"])
 
 
 class TeacherGrantSubscriptionSerializer(serializers.Serializer):
+    days = serializers.IntegerField(required=False, min_value=1, max_value=365)
+
+
+class TeacherPaymentDecisionSerializer(serializers.Serializer):
     days = serializers.IntegerField(required=False, min_value=1, max_value=365)
 
 

@@ -242,6 +242,7 @@ class PaymentTransaction(models.Model):
     PROVIDER_CHOICES = (
         ("payme", "Payme"),
         ("click", "Click"),
+        ("manual", "Manual"),
     )
     STATUS_CHOICES = (
         ("pending", "Pending"),
