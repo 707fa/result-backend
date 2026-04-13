@@ -2,6 +2,7 @@
 import os
 import logging
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,6 +23,21 @@ Primary tasks:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _get_int_env(name, default, min_value=0, max_value=10):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    if value < min_value:
+        return min_value
+    if value > max_value:
+        return max_value
+    return value
 
 
 def _mock_reply(text, has_image):
@@ -175,6 +191,9 @@ def _generate_with_gemini(user_text, image_data_url):
     if not api_key:
         return None
 
+    max_retries = _get_int_env("GEMINI_MAX_RETRIES", 2, min_value=0, max_value=6)
+    retry_delay_ms = _get_int_env("GEMINI_RETRY_DELAY_MS", 1200, min_value=200, max_value=10000)
+
     mime_type, image_base64 = _extract_data_url_parts(image_data_url)
 
     parts = [
@@ -205,7 +224,7 @@ def _generate_with_gemini(user_text, image_data_url):
     }
 
     model_candidates = []
-    for model_name in [configured_model, "gemini-2.5-flash", "gemini-2.0-flash"]:
+    for model_name in [configured_model, "gemini-2.5-flash"]:
         if model_name and model_name not in model_candidates:
             model_candidates.append(model_name)
 
@@ -217,34 +236,49 @@ def _generate_with_gemini(user_text, image_data_url):
                 f"https://generativelanguage.googleapis.com/{api_version}/models/"
                 f"{urllib.parse.quote(model)}:generateContent?key={urllib.parse.quote(api_key)}"
             )
-            try:
-                raw = _post_json(endpoint, {"Content-Type": "application/json"}, payload, timeout=90)
-                data = json.loads(raw)
-                answer = _extract_gemini_text(data)
-                if answer:
-                    return answer
-            except urllib.error.HTTPError as exc:
-                body = ""
+
+            for attempt in range(max_retries + 1):
                 try:
-                    body = exc.read().decode("utf-8", "ignore")[:800]
-                except Exception:
+                    raw = _post_json(endpoint, {"Content-Type": "application/json"}, payload, timeout=90)
+                    data = json.loads(raw)
+                    answer = _extract_gemini_text(data)
+                    if answer:
+                        return answer
+                    break
+                except urllib.error.HTTPError as exc:
                     body = ""
-                logger.warning(
-                    "[IMAN_AI][GEMINI] HTTP %s model=%s api=%s error=%s",
-                    exc.code,
-                    model,
-                    api_version,
-                    body,
-                )
-                continue
-            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-                logger.warning(
-                    "[IMAN_AI][GEMINI] request failed model=%s api=%s: %s",
-                    model,
-                    api_version,
-                    exc,
-                )
-                continue
+                    try:
+                        body = exc.read().decode("utf-8", "ignore")[:800]
+                    except Exception:
+                        body = ""
+                    logger.warning(
+                        "[IMAN_AI][GEMINI] HTTP %s model=%s api=%s attempt=%s/%s error=%s",
+                        exc.code,
+                        model,
+                        api_version,
+                        attempt + 1,
+                        max_retries + 1,
+                        body,
+                    )
+
+                    retryable = exc.code in {429, 500, 502, 503, 504}
+                    if retryable and attempt < max_retries:
+                        time.sleep((retry_delay_ms * (attempt + 1)) / 1000.0)
+                        continue
+                    break
+                except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+                    logger.warning(
+                        "[IMAN_AI][GEMINI] request failed model=%s api=%s attempt=%s/%s: %s",
+                        model,
+                        api_version,
+                        attempt + 1,
+                        max_retries + 1,
+                        exc,
+                    )
+                    if attempt < max_retries:
+                        time.sleep((retry_delay_ms * (attempt + 1)) / 1000.0)
+                        continue
+                    break
 
     return None
 
