@@ -549,6 +549,20 @@ class PaymentCreateSerializer(serializers.Serializer):
     provider = serializers.ChoiceField(choices=["payme", "click"])
 
 
+class TeacherGrantSubscriptionSerializer(serializers.Serializer):
+    days = serializers.IntegerField(required=False, min_value=1, max_value=365)
+
+
+class TeacherRenameGroupSerializer(serializers.Serializer):
+    title = serializers.CharField(max_length=255)
+
+    def validate_title(self, value):
+        title = value.strip()
+        if len(title) < 2:
+            raise serializers.ValidationError("Group title is too short")
+        return title
+
+
 class PaymentTransactionSerializer(serializers.ModelSerializer):
     class Meta:
         model = PaymentTransaction

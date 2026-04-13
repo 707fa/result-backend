@@ -70,6 +70,8 @@ from .serializers import (
     HomeworkSubmissionReviewSerializer,
     PaymentCreateSerializer,
     PaymentTransactionSerializer,
+    TeacherGrantSubscriptionSerializer,
+    TeacherRenameGroupSerializer,
 )
 
 
@@ -1081,6 +1083,34 @@ class TeacherDeactivateStudentView(APIView):
         return success_response("Student deactivated", payload)
 
 
+class TeacherGrantStudentSubscriptionView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def post(self, request, student_id):
+        if request.user.role != "teacher":
+            return error_response("Only teachers can grant access", {"role": ["teacher only"]}, status.HTTP_403_FORBIDDEN)
+
+        student = get_object_or_404(User.objects.select_related("group", "group__teacher"), id=student_id, role="student")
+        if not can_teacher_access_student(request.user, student):
+            return error_response("Access denied", {"student": ["No access to this student"]}, status.HTTP_403_FORBIDDEN)
+
+        serializer = TeacherGrantSubscriptionSerializer(data=request.data or {})
+        if not serializer.is_valid():
+            return error_response("Validation error", serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        days = serializer.validated_data.get("days", get_subscription_days())
+        paid_until = grant_subscription(student, days=days)
+
+        payload = {
+            "studentId": student.id,
+            "fullName": student.full_name,
+            "isPaid": True,
+            "paidUntil": paid_until.isoformat(),
+            "daysGranted": days,
+        }
+        return success_response("Student access granted", payload)
+
+
 class TeacherMyGroupsView(APIView):
     permission_classes = [IsAuthenticatedAndPaid]
 
@@ -1101,6 +1131,45 @@ class TeacherMyGroupsView(APIView):
 
         data = TeacherGroupSerializer(groups, many=True).data
         return success_response("Teacher groups fetched successfully", data)
+
+
+class TeacherGroupUpdateView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def patch(self, request, group_id):
+        if request.user.role != "teacher":
+            return error_response(
+                "Only teachers can update group title",
+                {"role": ["Only teachers can update group title"]},
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        group = Group.objects.filter(id=group_id, teacher=request.user).first()
+        if not group:
+            return error_response(
+                "Group not found or access denied",
+                {"group": ["Group not found or access denied"]},
+                status.HTTP_404_NOT_FOUND,
+            )
+
+        serializer = TeacherRenameGroupSerializer(data=request.data or {})
+        if not serializer.is_valid():
+            return error_response("Validation error", serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        next_title = serializer.validated_data["title"]
+        if group.title != next_title:
+            group.title = next_title
+            group.save(update_fields=["title"])
+
+        payload = {
+            "group": {
+                "id": group.id,
+                "title": group.title,
+                "time": group.time,
+                "days_pattern": group.days_pattern,
+            }
+        }
+        return success_response("Group title updated", payload)
 
 
 class TeacherGroupStudentsView(APIView):

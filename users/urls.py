@@ -11,8 +11,10 @@ from .views import (
     TeacherStudentProgressView,
     UpdateAvatarView,
     TeacherMyGroupsView,
+    TeacherGroupUpdateView,
     TeacherGroupStudentsView,
     TeacherDeactivateStudentView,
+    TeacherGrantStudentSubscriptionView,
     TeacherScoreStudentView,
     TeacherScoreHistoryView,
     AiChatMessagesView,
@@ -52,8 +54,10 @@ urlpatterns = [
 
     path("teacher/history", TeacherScoreHistoryView.as_view(), name="teacher-history"),
     path("teacher/groups", TeacherMyGroupsView.as_view(), name="teacher-groups"),
+    path("teacher/groups/<int:group_id>", TeacherGroupUpdateView.as_view(), name="teacher-group-update"),
     path("teacher/groups/<int:group_id>/students", TeacherGroupStudentsView.as_view(), name="teacher-group-students"),
     path("teacher/students/<int:student_id>/deactivate", TeacherDeactivateStudentView.as_view(), name="teacher-student-deactivate"),
+    path("teacher/students/<int:student_id>/subscription", TeacherGrantStudentSubscriptionView.as_view(), name="teacher-student-subscription"),
     path(
         "teacher/groups/<int:group_id>/students/<int:student_id>/score",
         TeacherScoreStudentView.as_view(),
