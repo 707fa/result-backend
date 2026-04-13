@@ -205,7 +205,7 @@ def _generate_with_gemini(user_text, image_data_url):
     }
 
     model_candidates = []
-    for model_name in [configured_model, "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+    for model_name in [configured_model, "gemini-2.5-flash", "gemini-2.0-flash"]:
         if model_name and model_name not in model_candidates:
             model_candidates.append(model_name)
 
