@@ -521,8 +521,12 @@ class HomeworkTaskSerializer(serializers.ModelSerializer):
             "teacher_name",
             "group_id",
             "group_title",
+            "task_type",
             "title",
             "description",
+            "speaking_topic",
+            "speaking_level",
+            "speaking_questions",
             "due_at",
             "is_active",
             "created_at",
@@ -531,8 +535,16 @@ class HomeworkTaskSerializer(serializers.ModelSerializer):
 
 class HomeworkTaskCreateSerializer(serializers.Serializer):
     group_id = serializers.IntegerField()
+    task_type = serializers.ChoiceField(choices=["homework", "speaking"], required=False, default="homework")
     title = serializers.CharField(max_length=255)
     description = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    speaking_topic = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=255)
+    speaking_level = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=40)
+    speaking_questions = serializers.ListField(
+        child=serializers.CharField(max_length=500),
+        required=False,
+        allow_empty=True,
+    )
     due_at = serializers.DateTimeField(required=False, allow_null=True)
 
     def validate_title(self, value):
@@ -540,6 +552,22 @@ class HomeworkTaskCreateSerializer(serializers.Serializer):
         if len(title) < 3:
             raise serializers.ValidationError("Title is too short")
         return title
+
+    def validate_speaking_questions(self, value):
+        cleaned = [str(item).strip() for item in value if str(item).strip()]
+        if len(cleaned) > 20:
+            raise serializers.ValidationError("Max 20 speaking questions per task")
+        return cleaned
+
+    def validate(self, attrs):
+        task_type = attrs.get("task_type", "homework")
+        if task_type == "speaking":
+            questions = attrs.get("speaking_questions") or []
+            if not questions:
+                raise serializers.ValidationError({"speaking_questions": ["Add at least one speaking question"]})
+            attrs["speaking_topic"] = str(attrs.get("speaking_topic") or attrs.get("title") or "").strip()
+            attrs["speaking_level"] = str(attrs.get("speaking_level") or "").strip().lower()
+        return attrs
 
 
 class HomeworkSubmissionSerializer(serializers.ModelSerializer):

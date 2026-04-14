@@ -252,6 +252,98 @@ def recalc_student_status(student):
         student.status_badge = "red"
 
 
+def smooth_progress(current_value, target_value, weight=0.2):
+    current = int(current_value or 0)
+    target = int(target_value or 0)
+    next_value = round((current * (1.0 - weight)) + (target * weight))
+    return max(0, min(100, next_value))
+
+
+def update_student_progress_from_speaking(student, analysis, transcript):
+    words_count = len([token for token in str(transcript or "").split() if token.strip()])
+    score = int(analysis.get("score") or 0)
+    grammar_score = int(analysis.get("grammarScore") or score)
+    vocabulary_score = int(analysis.get("vocabularyScore") or score)
+    fluency_score = int(analysis.get("fluencyScore") or score)
+
+    student.progress_speaking = smooth_progress(student.progress_speaking, score, weight=0.24)
+    student.progress_grammar = smooth_progress(student.progress_grammar, grammar_score, weight=0.14)
+    student.progress_vocabulary = smooth_progress(student.progress_vocabulary, vocabulary_score, weight=0.14)
+    student.progress_attendance = smooth_progress(student.progress_attendance, fluency_score, weight=0.1)
+
+    xp_gain = max(2, min(15, score // 8 + max(0, words_count // 18)))
+    student.weekly_xp = int(student.weekly_xp or 0) + xp_gain
+    student.level = max(1, 1 + (student.weekly_xp // 120))
+    student.streak_days = min(365, int(student.streak_days or 0) + 1)
+    recalc_student_status(student)
+    student.save(
+        update_fields=[
+            "progress_speaking",
+            "progress_grammar",
+            "progress_vocabulary",
+            "progress_attendance",
+            "weekly_xp",
+            "level",
+            "streak_days",
+            "status_badge",
+        ]
+    )
+
+
+def update_student_progress_from_ai_chat(student, user_text, has_image, assistant_reply):
+    text_value = str(user_text or "").strip()
+    reply_value = str(assistant_reply or "").strip().lower()
+    words_count = len([token for token in text_value.split() if token.strip()])
+
+    grammar_signal = 58
+    vocabulary_signal = 56
+    homework_signal = 54
+
+    if has_image:
+        homework_signal = 82
+    if words_count >= 8:
+        vocabulary_signal = 74
+        grammar_signal = 70
+    if words_count >= 18:
+        vocabulary_signal = 80
+        grammar_signal = 76
+
+    if any(key in reply_value for key in ["mistake", "error", "corrected", "fix"]):
+        grammar_signal += 4
+    if any(key in reply_value for key in ["vocabulary", "word choice", "phrase"]):
+        vocabulary_signal += 3
+    if any(key in reply_value for key in ["homework", "task", "answer"]):
+        homework_signal += 3
+
+    student.progress_homework = smooth_progress(student.progress_homework, min(100, homework_signal), weight=0.16)
+    student.progress_vocabulary = smooth_progress(student.progress_vocabulary, min(100, vocabulary_signal), weight=0.11)
+    student.progress_grammar = smooth_progress(student.progress_grammar, min(100, grammar_signal), weight=0.11)
+
+    xp_gain = 2
+    if has_image:
+        xp_gain += 3
+    if words_count >= 8:
+        xp_gain += 2
+    if words_count >= 18:
+        xp_gain += 2
+
+    student.weekly_xp = int(student.weekly_xp or 0) + xp_gain
+    student.level = max(1, 1 + (student.weekly_xp // 120))
+    student.streak_days = min(365, int(student.streak_days or 0) + 1)
+    recalc_student_status(student)
+    student.save(
+        update_fields=[
+            "progress_homework",
+            "progress_vocabulary",
+            "progress_grammar",
+            "weekly_xp",
+            "level",
+            "streak_days",
+            "status_badge",
+        ]
+    )
+
+
 def can_teacher_access_student(teacher, student):
     return (
         teacher.role == "teacher"
@@ -1466,7 +1558,7 @@ class TeacherHomeworkTasksView(APIView):
             return error_response("Only teachers can access homework tasks", {"role": ["teacher only"]}, status.HTTP_403_FORBIDDEN)
 
         tasks = (
-            HomeworkTask.objects.filter(teacher=request.user, is_active=True)
+            HomeworkTask.objects.filter(teacher=request.user, is_active=True, task_type="homework")
             .select_related("teacher", "group")
             .order_by("-created_at")
         )
@@ -1493,12 +1585,65 @@ class TeacherHomeworkTasksView(APIView):
         task = HomeworkTask.objects.create(
             teacher=request.user,
             group=group,
+            task_type="homework",
             title=serializer.validated_data["title"],
             description=serializer.validated_data.get("description", "") or "",
+            speaking_topic="",
+            speaking_level="",
+            speaking_questions=[],
             due_at=serializer.validated_data.get("due_at"),
         )
         data = HomeworkTaskSerializer(task).data
         return success_response("Homework task created", {"task": data}, status.HTTP_201_CREATED)
+
+
+class TeacherSpeakingTasksView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def get(self, request):
+        if request.user.role != "teacher":
+            return error_response("Only teachers can access speaking tasks", {"role": ["teacher only"]}, status.HTTP_403_FORBIDDEN)
+
+        tasks = (
+            HomeworkTask.objects.filter(teacher=request.user, is_active=True, task_type="speaking")
+            .select_related("teacher", "group")
+            .order_by("-created_at")
+        )
+        group_id = request.query_params.get("group_id")
+        if group_id:
+            tasks = tasks.filter(group_id=group_id)
+
+        data = HomeworkTaskSerializer(tasks, many=True).data
+        return success_response("Speaking tasks fetched", {"tasks": data})
+
+    def post(self, request):
+        if request.user.role != "teacher":
+            return error_response("Only teachers can create speaking tasks", {"role": ["teacher only"]}, status.HTTP_403_FORBIDDEN)
+
+        payload = request.data.copy()
+        payload["task_type"] = "speaking"
+        serializer = HomeworkTaskCreateSerializer(data=payload)
+        if not serializer.is_valid():
+            return error_response("Validation error", serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        group_id = serializer.validated_data["group_id"]
+        group = Group.objects.filter(id=group_id, teacher=request.user).first()
+        if not group:
+            return error_response("Group not found or access denied", {"group_id": ["Invalid group"]}, status.HTTP_404_NOT_FOUND)
+
+        task = HomeworkTask.objects.create(
+            teacher=request.user,
+            group=group,
+            task_type="speaking",
+            title=serializer.validated_data["title"],
+            description=serializer.validated_data.get("description", "") or "",
+            speaking_topic=serializer.validated_data.get("speaking_topic", "") or serializer.validated_data["title"],
+            speaking_level=serializer.validated_data.get("speaking_level", "") or "",
+            speaking_questions=serializer.validated_data.get("speaking_questions", []) or [],
+            due_at=serializer.validated_data.get("due_at"),
+        )
+        data = HomeworkTaskSerializer(task).data
+        return success_response("Speaking task created", {"task": data}, status.HTTP_201_CREATED)
 
 
 class TeacherHomeworkTaskSubmissionsView(APIView):
@@ -1569,7 +1714,7 @@ class StudentHomeworkTasksView(APIView):
             return success_response("Homework tasks fetched", {"tasks": []})
 
         tasks = (
-            HomeworkTask.objects.filter(group_id=request.user.group_id, is_active=True)
+            HomeworkTask.objects.filter(group_id=request.user.group_id, is_active=True, task_type="homework")
             .select_related("teacher", "group")
             .order_by("-created_at")
         )
@@ -1586,6 +1731,25 @@ class StudentHomeworkTasksView(APIView):
             payload.append(task_data)
 
         return success_response("Homework tasks fetched", {"tasks": payload})
+
+
+class StudentSpeakingTasksView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def get(self, request):
+        if request.user.role != "student":
+            return error_response("Only students can access speaking tasks", {"role": ["student only"]}, status.HTTP_403_FORBIDDEN)
+
+        if not request.user.group_id:
+            return success_response("Speaking tasks fetched", {"tasks": []})
+
+        tasks = (
+            HomeworkTask.objects.filter(group_id=request.user.group_id, is_active=True, task_type="speaking")
+            .select_related("teacher", "group")
+            .order_by("-created_at")
+        )
+        data = HomeworkTaskSerializer(tasks, many=True).data
+        return success_response("Speaking tasks fetched", {"tasks": data})
 
 
 class StudentHomeworkSubmitView(APIView):
@@ -1705,6 +1869,17 @@ class AiChatMessagesView(APIView):
             text=reply,
         )
 
+        if request.user.role == "student":
+            try:
+                update_student_progress_from_ai_chat(
+                    request.user,
+                    user_text=text,
+                    has_image=bool(image_base64),
+                    assistant_reply=reply,
+                )
+            except Exception:
+                logger.exception("[IMAN_AI] progress update failed")
+
         conversation.save(update_fields=["updated_at"])
 
         messages = conversation.messages.all()
@@ -1771,6 +1946,12 @@ class AiSpeakingCheckView(APIView):
                 {"speaking": ["AI service temporarily unavailable"]},
                 status.HTTP_503_SERVICE_UNAVAILABLE,
             )
+
+        if request.user.role == "student":
+            try:
+                update_student_progress_from_speaking(request.user, analysis, transcript)
+            except Exception:
+                logger.exception("[IMAN_SPEAKING] progress update failed")
 
         return success_response("Speaking analysis generated", analysis, status.HTTP_200_OK)
 

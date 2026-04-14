@@ -32,9 +32,11 @@ from .views import (
     TeacherPaymentRequestApproveView,
     TeacherPaymentRequestRejectView,
     TeacherHomeworkTasksView,
+    TeacherSpeakingTasksView,
     TeacherHomeworkTaskSubmissionsView,
     TeacherHomeworkSubmissionReviewView,
     StudentHomeworkTasksView,
+    StudentSpeakingTasksView,
     StudentHomeworkSubmitView,
 )
 
@@ -91,9 +93,11 @@ urlpatterns = [
     path("support/tickets/<int:ticket_id>", SupportTicketUpdateView.as_view(), name="support-ticket-update"),
 
     path("teacher/homework/tasks", TeacherHomeworkTasksView.as_view(), name="teacher-homework-tasks"),
+    path("teacher/speaking/tasks", TeacherSpeakingTasksView.as_view(), name="teacher-speaking-tasks"),
     path("teacher/homework/tasks/<int:task_id>/submissions", TeacherHomeworkTaskSubmissionsView.as_view(), name="teacher-homework-task-submissions"),
     path("teacher/homework/submissions/<int:submission_id>", TeacherHomeworkSubmissionReviewView.as_view(), name="teacher-homework-submission-review"),
 
     path("student/homework/tasks", StudentHomeworkTasksView.as_view(), name="student-homework-tasks"),
+    path("student/speaking/tasks", StudentSpeakingTasksView.as_view(), name="student-speaking-tasks"),
     path("student/homework/tasks/<int:task_id>/submit", StudentHomeworkSubmitView.as_view(), name="student-homework-submit"),
 ]

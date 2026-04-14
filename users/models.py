@@ -200,10 +200,19 @@ class FriendlyMessage(models.Model):
 
 
 class HomeworkTask(models.Model):
+    TASK_TYPE_CHOICES = (
+        ("homework", "Homework"),
+        ("speaking", "Speaking"),
+    )
+
     teacher = models.ForeignKey("users.User", on_delete=models.CASCADE, related_name="homework_tasks")
     group = models.ForeignKey("groups.Group", on_delete=models.CASCADE, related_name="homework_tasks")
+    task_type = models.CharField(max_length=20, choices=TASK_TYPE_CHOICES, default="homework")
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True)
+    speaking_topic = models.CharField(max_length=255, blank=True)
+    speaking_level = models.CharField(max_length=40, blank=True)
+    speaking_questions = models.JSONField(default=list, blank=True)
     due_at = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
