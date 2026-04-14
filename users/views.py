@@ -39,7 +39,7 @@ from .models import (
     HomeworkSubmission,
     PaymentTransaction,
 )
-from .ai_service import generate_iman_ai_reply
+from .ai_service import generate_iman_ai_reply, generate_speaking_analysis
 from .permissions import IsAuthenticatedAndPaid
 from .subscription import get_subscription_payload, grant_subscription
 from .serializers import (
@@ -59,6 +59,7 @@ from .serializers import (
     AiMessageSerializer,
     AiConversationSerializer,
     AiSendMessageSerializer,
+    AiSpeakingCheckSerializer,
     FriendlyConversationSerializer,
     FriendlyConversationCreateSerializer,
     FriendlyMessageSerializer,
@@ -1640,6 +1641,11 @@ class AiChatMessagesView(APIView):
         conversation, _ = AiConversation.objects.get_or_create(user=request.user)
         text = serializer.validated_data.get("text", "")
         image_base64 = serializer.validated_data.get("imageBase64", "")
+        level = serializer.validated_data.get("level", "")
+        language = serializer.validated_data.get("language", "")
+        group_title = serializer.validated_data.get("groupTitle", "")
+        group_time = serializer.validated_data.get("groupTime", "")
+        system_context = serializer.validated_data.get("systemContext", "")
 
         user_message = AiMessage.objects.create(
             conversation=conversation,
@@ -1660,8 +1666,35 @@ class AiChatMessagesView(APIView):
             filename, content = saved_image
             user_message.image.save(filename, content, save=True)
 
+        if not level and request.user.group_id:
+            try:
+                group_value = request.user.group.title.lower()
+                if "beginner" in group_value:
+                    level = "beginner"
+                elif "elementary" in group_value:
+                    level = "elementary"
+                elif "pre" in group_value and "inter" in group_value:
+                    level = "pre-intermediate"
+                elif "intermediate" in group_value:
+                    level = "intermediate"
+            except Exception:
+                level = level or ""
+
+        if not group_title and request.user.group_id:
+            group_title = request.user.group.title
+        if not group_time and request.user.group_id:
+            group_time = request.user.group.time
+
         try:
-            reply = generate_iman_ai_reply(text=text, image_data_url=image_base64)
+            reply = generate_iman_ai_reply(
+                text=text,
+                image_data_url=image_base64,
+                level=level,
+                language=language,
+                group_title=group_title,
+                group_time=group_time,
+                system_context=system_context,
+            )
         except Exception:
             logger.exception("[IMAN_AI] unexpected provider failure")
             reply = build_ai_unavailable_reply(text, bool(image_base64))
@@ -1681,6 +1714,65 @@ class AiChatMessagesView(APIView):
             "lastAssistantMessage": AiMessageSerializer(assistant_message, context={"request": request}).data,
         }
         return success_response("AI reply generated", payload, status.HTTP_201_CREATED)
+
+
+class AiSpeakingCheckView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def post(self, request):
+        serializer = AiSpeakingCheckSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("Validation error", serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        question = serializer.validated_data["question"]
+        transcript = serializer.validated_data["transcript"]
+        level = serializer.validated_data.get("level", "")
+        language = serializer.validated_data.get("language", "")
+        group_title = serializer.validated_data.get("groupTitle", "")
+        group_time = serializer.validated_data.get("groupTime", "")
+
+        word_count = len([token for token in transcript.split() if token.strip()])
+        if word_count < 4:
+            return error_response(
+                "Validation error",
+                {"transcript": ["Please provide a longer answer (at least 4 words)."]},
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not level and request.user.group_id:
+            group_name = (request.user.group.title or "").lower()
+            if "beginner" in group_name:
+                level = "beginner"
+            elif "elementary" in group_name:
+                level = "elementary"
+            elif "pre" in group_name and "inter" in group_name:
+                level = "pre-intermediate"
+            elif "intermediate" in group_name:
+                level = "intermediate"
+
+        if not group_title and request.user.group_id:
+            group_title = request.user.group.title
+        if not group_time and request.user.group_id:
+            group_time = request.user.group.time
+
+        try:
+            analysis = generate_speaking_analysis(
+                question=question,
+                transcript=transcript,
+                level=level,
+                language=language,
+                group_title=group_title,
+                group_time=group_time,
+            )
+        except Exception:
+            logger.exception("[IMAN_SPEAKING] analysis failed")
+            return error_response(
+                "Speaking AI is temporarily unavailable",
+                {"speaking": ["AI service temporarily unavailable"]},
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return success_response("Speaking analysis generated", analysis, status.HTTP_200_OK)
 
 
 class FriendlyConversationsView(APIView):

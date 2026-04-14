@@ -18,6 +18,7 @@ from .views import (
     TeacherScoreStudentView,
     TeacherScoreHistoryView,
     AiChatMessagesView,
+    AiSpeakingCheckView,
     FriendlyConversationsView,
     FriendlyConversationMessagesView,
     GrammarTopicsView,
@@ -80,6 +81,7 @@ urlpatterns = [
     path("teacher/score", TeacherScoreStudentView.as_view(), name="teacher-score"),
 
     path("chat/ai/messages", AiChatMessagesView.as_view(), name="chat-ai-messages"),
+    path("chat/ai/speaking/check", AiSpeakingCheckView.as_view(), name="chat-ai-speaking-check"),
     path("chat/friendly/conversations", FriendlyConversationsView.as_view(), name="chat-friendly-conversations"),
     path("chat/friendly/conversations/<int:conversation_id>/messages", FriendlyConversationMessagesView.as_view(), name="chat-friendly-messages"),
 

@@ -428,6 +428,11 @@ class AiConversationSerializer(serializers.ModelSerializer):
 class AiSendMessageSerializer(serializers.Serializer):
     text = serializers.CharField(required=False, allow_blank=True)
     imageBase64 = serializers.CharField(required=False, allow_blank=True)
+    level = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    language = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    groupTitle = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    groupTime = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    systemContext = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     def validate(self, attrs):
         text = (attrs.get("text") or "").strip()
@@ -436,6 +441,37 @@ class AiSendMessageSerializer(serializers.Serializer):
             raise serializers.ValidationError({"message": "Provide text or image"})
         attrs["text"] = text
         attrs["imageBase64"] = image
+        attrs["level"] = str(attrs.get("level") or "").strip().lower()
+        attrs["language"] = str(attrs.get("language") or "").strip().lower()
+        attrs["groupTitle"] = str(attrs.get("groupTitle") or "").strip()
+        attrs["groupTime"] = str(attrs.get("groupTime") or "").strip()
+        attrs["systemContext"] = str(attrs.get("systemContext") or "").strip()
+        return attrs
+
+
+class AiSpeakingCheckSerializer(serializers.Serializer):
+    question = serializers.CharField(max_length=2000)
+    transcript = serializers.CharField(max_length=5000)
+    level = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    language = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    groupTitle = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    groupTime = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    mode = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+    def validate(self, attrs):
+        question = str(attrs.get("question") or "").strip()
+        transcript = str(attrs.get("transcript") or "").strip()
+        if not question:
+            raise serializers.ValidationError({"question": ["Question is required"]})
+        if not transcript:
+            raise serializers.ValidationError({"transcript": ["Transcript is required"]})
+        attrs["question"] = question
+        attrs["transcript"] = transcript
+        attrs["level"] = str(attrs.get("level") or "").strip().lower()
+        attrs["language"] = str(attrs.get("language") or "").strip().lower()
+        attrs["groupTitle"] = str(attrs.get("groupTitle") or "").strip()
+        attrs["groupTime"] = str(attrs.get("groupTime") or "").strip()
+        attrs["mode"] = str(attrs.get("mode") or "").strip().lower()
         return attrs
 
 
