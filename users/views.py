@@ -6,9 +6,12 @@ import logging
 import os
 import re
 import uuid
+import hashlib
 from base64 import b64encode
 from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from django.conf import settings
 from django.contrib.auth import authenticate
@@ -70,6 +73,7 @@ from .serializers import (
     HomeworkSubmissionCreateSerializer,
     HomeworkSubmissionReviewSerializer,
     PaymentCreateSerializer,
+    ManualPaymentReceiptUploadSerializer,
     PaymentTransactionSerializer,
     TeacherGrantSubscriptionSerializer,
     TeacherPaymentDecisionSerializer,
@@ -876,6 +880,254 @@ def has_duplicate_external_id(provider, external_id, current_transaction_id):
     ).exclude(id=current_transaction_id).exists()
 
 
+def _safe_json_loads(raw_text):
+    text = str(raw_text or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+    if fenced:
+        snippet = fenced.group(1).strip()
+        try:
+            parsed = json.loads(snippet)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        snippet = text[start : end + 1]
+        try:
+            parsed = json.loads(snippet)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def _receipt_amount_matches(tx_amount, detected_amount):
+    if detected_amount is None:
+        return False
+    try:
+        tx_value = Decimal(tx_amount).quantize(Decimal("0.01"))
+        detected = Decimal(str(detected_amount)).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError, TypeError):
+        return False
+    return tx_value == detected
+
+
+def _build_manual_receipt_ai_prompt(payment_tx, receipt_url):
+    return "\n".join(
+        [
+            "You validate a payment receipt for a language center.",
+            "Return strict JSON only.",
+            "{",
+            '  "verdict": "likely_valid|likely_fake|unclear",',
+            '  "detectedAmount": number | null,',
+            '  "reason": "short reason",',
+            '  "confidence": number',
+            "}",
+            f"Expected amount (UZS): {payment_tx.amount}",
+            f"Student phone: {payment_tx.user.phone}",
+            f"Receipt image URL: {receipt_url}",
+            "Mark likely_fake if amount mismatch, obvious edit signs, or missing key details.",
+        ]
+    )
+
+
+def evaluate_manual_receipt(payment_tx, receipt_url):
+    prompt = _build_manual_receipt_ai_prompt(payment_tx, receipt_url)
+    raw = generate_iman_ai_reply(
+        text=prompt,
+        level="intermediate",
+        language="en",
+        group_title=payment_tx.user.group.title if payment_tx.user.group_id else "",
+        group_time=payment_tx.user.group.time if payment_tx.user.group_id else "",
+    )
+    parsed = _safe_json_loads(raw)
+    if not parsed:
+        return {
+            "verdict": "pending",
+            "reason": "AI check unavailable, pending teacher review.",
+            "detected_amount": None,
+            "raw": str(raw or "")[:1200],
+        }
+
+    verdict_raw = str(parsed.get("verdict") or "").strip().lower()
+    if verdict_raw not in {"likely_valid", "likely_fake", "unclear"}:
+        verdict_raw = "unclear"
+
+    detected_amount = parse_decimal_value(parsed.get("detectedAmount"))
+    reason = str(parsed.get("reason") or "").strip()[:500]
+
+    if detected_amount is not None and _receipt_amount_matches(payment_tx.amount, detected_amount):
+        verdict = "likely_valid" if verdict_raw != "likely_fake" else "likely_fake"
+    else:
+        verdict = "likely_fake" if detected_amount is not None else verdict_raw
+
+    if verdict == "unclear":
+        verdict = "pending"
+
+    return {
+        "verdict": verdict,
+        "reason": reason or "Pending manual verification.",
+        "detected_amount": detected_amount,
+        "raw": str(raw or "")[:1200],
+    }
+
+
+def _telegram_bot_token():
+    return str(os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+
+
+def _telegram_chat_ids():
+    raw = str(os.environ.get("TELEGRAM_CHAT_IDS") or os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+    if not raw:
+        return []
+    values = []
+    for chunk in re.split(r"[,\n;]+", raw):
+        value = str(chunk or "").strip()
+        if value:
+            values.append(value)
+    return values
+
+
+def _telegram_sign_secret():
+    return str(os.environ.get("TELEGRAM_BOT_SECRET") or os.environ.get("PAYMENT_WEBHOOK_SECRET") or "").strip()
+
+
+def _telegram_sign(action, tx_id, days):
+    secret = _telegram_sign_secret()
+    base = f"{action}:{tx_id}:{days}"
+    if not secret:
+        return "no-secret"
+    digest = hmac.new(secret.encode("utf-8"), base.encode("utf-8"), hashlib.sha256).hexdigest()
+    return digest[:16]
+
+
+def _telegram_verify_sign(action, tx_id, days, sign):
+    expected = _telegram_sign(action, tx_id, days)
+    return hmac.compare_digest(str(sign or ""), expected)
+
+
+def _telegram_api_call(method, payload):
+    token = _telegram_bot_token()
+    if not token:
+        return None
+
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    encoded = urlencode(payload).encode("utf-8")
+    req = Request(url, data=encoded, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with urlopen(req, timeout=20) as response:
+            body = response.read().decode("utf-8")
+        return _safe_json_loads(body) or {}
+    except Exception:
+        logger.exception("[PAYMENTS][TELEGRAM] %s failed", method)
+        return None
+
+
+def _build_telegram_caption(payment_tx):
+    group = payment_tx.user.group
+    group_label = f"{group.title} / {group.time}" if group else "No group"
+    verdict = payment_tx.manual_verdict or "pending"
+    verdict_label = {
+        "likely_valid": "Likely valid",
+        "likely_fake": "Likely fake",
+        "pending": "Pending",
+    }.get(verdict, verdict)
+    return (
+        f"New payment receipt #{payment_tx.id}\n"
+        f"Student: {payment_tx.user.full_name}\n"
+        f"Phone: {payment_tx.user.phone}\n"
+        f"Group: {group_label}\n"
+        f"Amount: {payment_tx.amount} UZS\n"
+        f"AI verdict: {verdict_label}\n"
+        f"Reason: {payment_tx.manual_verdict_reason or '-'}"
+    )
+
+
+def notify_telegram_manual_payment(payment_tx, request):
+    token = _telegram_bot_token()
+    chat_ids = _telegram_chat_ids()
+    if not token or not chat_ids:
+        return False
+
+    receipt_url = None
+    if payment_tx.manual_receipt:
+        try:
+            receipt_url = request.build_absolute_uri(payment_tx.manual_receipt.url)
+        except Exception:
+            receipt_url = None
+
+    days = get_subscription_days()
+    approve_sign = _telegram_sign("approve", payment_tx.id, days)
+    reject_sign = _telegram_sign("reject", payment_tx.id, days)
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Approve access (30d)",
+                    "callback_data": f"pay:approve:{payment_tx.id}:{days}:{approve_sign}",
+                },
+                {
+                    "text": "Reject",
+                    "callback_data": f"pay:reject:{payment_tx.id}:{days}:{reject_sign}",
+                },
+            ]
+        ]
+    }
+
+    caption = _build_telegram_caption(payment_tx)
+    if receipt_url:
+        caption = f"{caption}\nReceipt: {receipt_url}"
+
+    success = False
+    for chat_id in chat_ids:
+        payload = {
+            "chat_id": chat_id,
+            "text": caption,
+            "reply_markup": json.dumps(keyboard, separators=(",", ":")),
+            "disable_web_page_preview": "false",
+        }
+        result = _telegram_api_call("sendMessage", payload)
+        if result and result.get("ok"):
+            success = True
+            try:
+                message = result.get("result") or {}
+                payment_tx.telegram_chat_id = str(chat_id)
+                payment_tx.telegram_message_id = message.get("message_id")
+                payment_tx.save(update_fields=["telegram_chat_id", "telegram_message_id"])
+            except Exception:
+                logger.exception("[PAYMENTS][TELEGRAM] failed to store message id")
+    return success
+
+
+def _telegram_answer_callback(callback_query_id, text):
+    if not callback_query_id:
+        return
+    _telegram_api_call("answerCallbackQuery", {"callback_query_id": callback_query_id, "text": text})
+
+
+def _telegram_edit_message(chat_id, message_id, text):
+    if not chat_id or not message_id:
+        return
+    _telegram_api_call(
+        "editMessageText",
+        {"chat_id": chat_id, "message_id": message_id, "text": text, "disable_web_page_preview": "true"},
+    )
+
+
 class PaymentCreateView(APIView):
     permission_classes = [IsAuthenticatedAndPaid]
 
@@ -915,7 +1167,7 @@ class PaymentCreateView(APIView):
             payment_tx.payload_raw = "manual_payment_request"
             payment_tx.save(update_fields=["payload_raw"])
             payload = {
-                "transaction": PaymentTransactionSerializer(payment_tx).data,
+                "transaction": PaymentTransactionSerializer(payment_tx, context={"request": request}).data,
                 "subscription": get_subscription_payload(request.user),
                 "manualFlow": True,
             }
@@ -943,7 +1195,7 @@ class PaymentCreateView(APIView):
         payment_tx.save(update_fields=["checkout_url"])
 
         payload = {
-            "transaction": PaymentTransactionSerializer(payment_tx).data,
+            "transaction": PaymentTransactionSerializer(payment_tx, context={"request": request}).data,
             "subscription": get_subscription_payload(request.user),
         }
         return success_response("Payment link created", payload, status.HTTP_201_CREATED)
@@ -960,16 +1212,97 @@ class PaymentStatusView(APIView):
         )
         payload = {
             "subscription": get_subscription_payload(request.user),
-            "lastTransaction": PaymentTransactionSerializer(last_transaction).data if last_transaction else None,
+            "lastTransaction": PaymentTransactionSerializer(last_transaction, context={"request": request}).data if last_transaction else None,
         }
         return success_response("Payment status", payload)
 
 
-def serialize_teacher_payment_request_item(payment_tx):
+class PaymentManualReceiptUploadView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def post(self, request):
+        if request.user.role != "student":
+            return error_response("Only students can upload receipt", {"role": ["student only"]}, status.HTTP_403_FORBIDDEN)
+
+        serializer = ManualPaymentReceiptUploadSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("Validation error", serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        transaction_id = serializer.validated_data.get("transaction_id")
+        amount = get_subscription_price()
+
+        payment_tx = None
+        if transaction_id:
+            payment_tx = (
+                PaymentTransaction.objects.select_related("user", "user__group")
+                .filter(id=transaction_id, user=request.user, provider="manual")
+                .first()
+            )
+
+        if not payment_tx:
+            payment_tx = (
+                PaymentTransaction.objects.select_related("user", "user__group")
+                .filter(user=request.user, provider="manual", status="pending")
+                .order_by("-created_at")
+                .first()
+            )
+
+        if not payment_tx:
+            payment_tx = PaymentTransaction.objects.create(
+                user=request.user,
+                provider="manual",
+                amount=amount,
+                status="pending",
+            )
+
+        receipt = serializer.validated_data["receipt"]
+        payment_tx.manual_receipt = receipt
+        payment_tx.manual_receipt_uploaded_at = timezone.now()
+        payment_tx.manual_verdict = "pending"
+        payment_tx.manual_verdict_reason = "Pending AI check."
+        payment_tx.manual_detected_amount = None
+        payment_tx.save(
+            update_fields=[
+                "manual_receipt",
+                "manual_receipt_uploaded_at",
+                "manual_verdict",
+                "manual_verdict_reason",
+                "manual_detected_amount",
+            ]
+        )
+
+        receipt_url = request.build_absolute_uri(payment_tx.manual_receipt.url)
+        ai_result = evaluate_manual_receipt(payment_tx, receipt_url)
+
+        payment_tx.manual_verdict = ai_result["verdict"]
+        payment_tx.manual_verdict_reason = ai_result["reason"]
+        payment_tx.manual_detected_amount = ai_result["detected_amount"]
+        payment_tx.payload_raw = normalize_webhook_payload(
+            {
+                "manual_receipt_ai": {
+                    "verdict": ai_result["verdict"],
+                    "reason": ai_result["reason"],
+                    "detected_amount": str(ai_result["detected_amount"]) if ai_result["detected_amount"] is not None else None,
+                    "raw": ai_result["raw"],
+                }
+            }
+        )
+        payment_tx.save(update_fields=["manual_verdict", "manual_verdict_reason", "manual_detected_amount", "payload_raw"])
+
+        telegram_sent = notify_telegram_manual_payment(payment_tx, request)
+        payload = {
+            "transaction": PaymentTransactionSerializer(payment_tx, context={"request": request}).data,
+            "subscription": get_subscription_payload(request.user),
+            "telegramNotified": telegram_sent,
+        }
+        return success_response("Receipt uploaded", payload, status.HTTP_201_CREATED)
+
+
+def serialize_teacher_payment_request_item(payment_tx, request=None):
     student = payment_tx.user
     group = getattr(student, "group", None)
     return {
-        "transaction": PaymentTransactionSerializer(payment_tx).data,
+        "transaction": PaymentTransactionSerializer(payment_tx, context={"request": request}).data,
         "student": {
             "id": student.id,
             "fullName": student.full_name,
@@ -994,7 +1327,7 @@ class TeacherPaymentRequestsView(APIView):
             .order_by("-created_at")
         )
         payload = {
-            "requests": [serialize_teacher_payment_request_item(item) for item in qs],
+            "requests": [serialize_teacher_payment_request_item(item, request=request) for item in qs],
         }
         return success_response("Teacher payment requests", payload)
 
@@ -1034,11 +1367,14 @@ class TeacherPaymentRequestApproveView(APIView):
 
             payment_tx.status = "paid"
             payment_tx.paid_at = timezone.now()
-            payment_tx.save(update_fields=["status", "paid_at"])
+            payment_tx.reviewed_by = request.user
+            payment_tx.reviewed_at = timezone.now()
+            payment_tx.manual_verdict_reason = payment_tx.manual_verdict_reason or "Approved by teacher."
+            payment_tx.save(update_fields=["status", "paid_at", "reviewed_by", "reviewed_at", "manual_verdict_reason"])
             paid_until = grant_subscription(payment_tx.user, days=days)
 
         payload = {
-            "request": serialize_teacher_payment_request_item(payment_tx),
+            "request": serialize_teacher_payment_request_item(payment_tx, request=request),
             "paidUntil": paid_until.isoformat(),
         }
         return success_response("Payment request approved", payload)
@@ -1072,10 +1408,87 @@ class TeacherPaymentRequestRejectView(APIView):
                 )
 
             payment_tx.status = "failed"
-            payment_tx.save(update_fields=["status"])
+            payment_tx.reviewed_by = request.user
+            payment_tx.reviewed_at = timezone.now()
+            payment_tx.manual_verdict_reason = payment_tx.manual_verdict_reason or "Rejected by teacher."
+            payment_tx.save(update_fields=["status", "reviewed_by", "reviewed_at", "manual_verdict_reason"])
 
-        payload = {"request": serialize_teacher_payment_request_item(payment_tx)}
+        payload = {"request": serialize_teacher_payment_request_item(payment_tx, request=request)}
         return success_response("Payment request rejected", payload)
+
+
+class PaymentTelegramWebhookView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        update = request.data if isinstance(request.data, dict) else {}
+        callback_query = update.get("callback_query") if isinstance(update, dict) else None
+        if not isinstance(callback_query, dict):
+            return success_response("Ignored", {"ok": True})
+
+        callback_id = callback_query.get("id")
+        data = str(callback_query.get("data") or "").strip()
+        message = callback_query.get("message") if isinstance(callback_query.get("message"), dict) else {}
+        chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
+        chat_id = str(chat.get("id") or "")
+        message_id = message.get("message_id")
+
+        chunks = data.split(":")
+        if len(chunks) != 5 or chunks[0] != "pay":
+            _telegram_answer_callback(callback_id, "Invalid action")
+            return success_response("Ignored", {"ok": True})
+
+        action = chunks[1]
+        tx_id = parse_transaction_id(chunks[2])
+        days = int(chunks[3]) if chunks[3].isdigit() else get_subscription_days()
+        sign = chunks[4]
+
+        if action not in {"approve", "reject"} or tx_id is None:
+            _telegram_answer_callback(callback_id, "Invalid action payload")
+            return success_response("Ignored", {"ok": True})
+
+        if not _telegram_verify_sign(action, tx_id, days, sign):
+            _telegram_answer_callback(callback_id, "Signature check failed")
+            return error_response("Unauthorized", {"signature": ["Invalid callback signature"]}, status.HTTP_401_UNAUTHORIZED)
+
+        with transaction.atomic():
+            payment_tx = (
+                PaymentTransaction.objects.select_for_update()
+                .select_related("user")
+                .filter(id=tx_id, provider="manual")
+                .first()
+            )
+            if not payment_tx:
+                _telegram_answer_callback(callback_id, "Transaction not found")
+                return error_response("Not found", {"transaction": ["Not found"]}, status.HTTP_404_NOT_FOUND)
+
+            if payment_tx.status == "paid":
+                _telegram_answer_callback(callback_id, "Already approved")
+            else:
+                if action == "approve":
+                    payment_tx.status = "paid"
+                    payment_tx.paid_at = payment_tx.paid_at or timezone.now()
+                    payment_tx.reviewed_at = timezone.now()
+                    payment_tx.manual_verdict_reason = payment_tx.manual_verdict_reason or "Approved from Telegram."
+                    payment_tx.save(update_fields=["status", "paid_at", "reviewed_at", "manual_verdict_reason"])
+                    grant_subscription(payment_tx.user, days=days)
+                    _telegram_answer_callback(callback_id, "Approved")
+                else:
+                    payment_tx.status = "failed"
+                    payment_tx.reviewed_at = timezone.now()
+                    payment_tx.manual_verdict_reason = payment_tx.manual_verdict_reason or "Rejected from Telegram."
+                    payment_tx.save(update_fields=["status", "reviewed_at", "manual_verdict_reason"])
+                    _telegram_answer_callback(callback_id, "Rejected")
+
+        status_label = "APPROVED" if payment_tx.status == "paid" else "REJECTED"
+        summary = (
+            f"Payment #{payment_tx.id} {status_label}\n"
+            f"Student: {payment_tx.user.full_name}\n"
+            f"Amount: {payment_tx.amount} UZS\n"
+            f"Status: {payment_tx.status}"
+        )
+        _telegram_edit_message(chat_id, message_id, summary)
+        return success_response("Telegram callback processed", {"transactionId": payment_tx.id, "status": payment_tx.status})
 
 
 class PaymentWebhookPaymeView(APIView):

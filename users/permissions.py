@@ -36,6 +36,8 @@ class IsAuthenticatedAndPaid(BasePermission):
             "/api/payments/create",
             "/payments/status",
             "/api/payments/status",
+            "/payments/manual-receipt",
+            "/api/payments/manual-receipt",
         )
 
         if any(path == allowed or path.startswith(f"{allowed}/") for allowed in free_paths):

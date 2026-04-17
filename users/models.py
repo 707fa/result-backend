@@ -266,6 +266,21 @@ class PaymentTransaction(models.Model):
     external_id = models.CharField(max_length=255, blank=True, null=True)
     checkout_url = models.URLField(max_length=1500, blank=True)
     payload_raw = models.TextField(blank=True)
+    manual_receipt = models.FileField(upload_to="payment_receipts/", blank=True, null=True)
+    manual_receipt_uploaded_at = models.DateTimeField(blank=True, null=True)
+    manual_verdict = models.CharField(max_length=24, default="pending")
+    manual_verdict_reason = models.TextField(blank=True)
+    manual_detected_amount = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    telegram_chat_id = models.CharField(max_length=64, blank=True)
+    telegram_message_id = models.BigIntegerField(blank=True, null=True)
+    reviewed_by = models.ForeignKey(
+        "users.User",
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name="reviewed_payment_transactions",
+    )
+    reviewed_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     paid_at = models.DateTimeField(blank=True, null=True)
 

@@ -613,6 +613,17 @@ class PaymentCreateSerializer(serializers.Serializer):
     provider = serializers.ChoiceField(choices=["payme", "click", "manual"])
 
 
+class ManualPaymentReceiptUploadSerializer(serializers.Serializer):
+    transaction_id = serializers.IntegerField(required=False)
+    receipt = serializers.ImageField(required=True)
+
+    def validate_receipt(self, value):
+        max_bytes = 8 * 1024 * 1024
+        if value.size > max_bytes:
+            raise serializers.ValidationError("Receipt image is too large (max 8MB)")
+        return value
+
+
 class TeacherGrantSubscriptionSerializer(serializers.Serializer):
     days = serializers.IntegerField(required=False, min_value=1, max_value=365)
 
@@ -632,6 +643,19 @@ class TeacherRenameGroupSerializer(serializers.Serializer):
 
 
 class PaymentTransactionSerializer(serializers.ModelSerializer):
+    receipt_url = serializers.SerializerMethodField()
+
+    def get_receipt_url(self, obj):
+        if not getattr(obj, "manual_receipt", None):
+            return None
+        request = self.context.get("request")
+        try:
+            if request:
+                return request.build_absolute_uri(obj.manual_receipt.url)
+            return obj.manual_receipt.url
+        except Exception:
+            return None
+
     class Meta:
         model = PaymentTransaction
         fields = (
@@ -640,6 +664,12 @@ class PaymentTransactionSerializer(serializers.ModelSerializer):
             "amount",
             "status",
             "checkout_url",
+            "receipt_url",
+            "manual_verdict",
+            "manual_verdict_reason",
+            "manual_detected_amount",
+            "manual_receipt_uploaded_at",
+            "reviewed_at",
             "created_at",
             "paid_at",
         )
