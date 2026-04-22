@@ -40,6 +40,7 @@ from .views import (
     StudentHomeworkTasksView,
     StudentSpeakingTasksView,
     StudentHomeworkSubmitView,
+    VoiceTTSView,
 )
 
 urlpatterns = [
@@ -88,6 +89,7 @@ urlpatterns = [
 
     path("chat/ai/messages", AiChatMessagesView.as_view(), name="chat-ai-messages"),
     path("chat/ai/speaking/check", AiSpeakingCheckView.as_view(), name="chat-ai-speaking-check"),
+    path("voice/tts", VoiceTTSView.as_view(), name="voice-tts"),
     path("chat/friendly/conversations", FriendlyConversationsView.as_view(), name="chat-friendly-conversations"),
     path("chat/friendly/conversations/<int:conversation_id>/messages", FriendlyConversationMessagesView.as_view(), name="chat-friendly-messages"),
 

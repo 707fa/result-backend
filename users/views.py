@@ -12,6 +12,7 @@ from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
 from django.conf import settings
 from django.contrib.auth import authenticate
@@ -21,6 +22,7 @@ from django.db.models import Count
 from django.core.files.base import ContentFile
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.http import HttpResponse
 
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
@@ -85,6 +87,7 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_AI_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 DEFAULT_AI_MAX_IMAGE_BYTES = 5 * 1024 * 1024
+DEFAULT_VOICE_TTS_TIMEOUT_SECONDS = 65
 
 
 def success_response(message, data=None, status_code=status.HTTP_200_OK):
@@ -156,6 +159,147 @@ def get_env_int(name, default):
     except (TypeError, ValueError):
         return default
     return value if value > 0 else default
+
+
+def get_env_float(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _voice_timeout_seconds():
+    return get_env_float("VOICE_TTS_TIMEOUT_SECONDS", DEFAULT_VOICE_TTS_TIMEOUT_SECONDS)
+
+
+def _normalize_voice_format(value):
+    normalized = str(value or "").strip().lower()
+    if normalized in {"mp3", "wav", "opus", "aac", "flac"}:
+        return normalized
+    return "mp3"
+
+
+def _normalize_voice_name(value, provider):
+    voice = str(value or "").strip()
+    if voice:
+        return voice
+    if provider == "openai":
+        return (os.environ.get("VOICE_TTS_OPENAI_VOICE", "") or "").strip() or "alloy"
+    return (os.environ.get("VOICE_TTS_GEMINI_VOICE", "") or "").strip() or "Kore"
+
+
+def _gemini_tts_request(text, lang, voice_name, audio_format):
+    gemini_key = (os.environ.get("GEMINI_API_KEY", "") or "").strip()
+    if not gemini_key:
+        raise RuntimeError("GEMINI_API_KEY is not configured")
+
+    model = (os.environ.get("VOICE_TTS_GEMINI_MODEL", "") or "").strip() or "gemini-2.5-flash-preview-tts"
+    timeout_seconds = _voice_timeout_seconds()
+    request_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={quote(gemini_key)}"
+
+    payload = {
+        "contents": [{"parts": [{"text": text}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {
+                        "voiceName": voice_name,
+                    }
+                }
+            },
+        },
+    }
+
+    if lang:
+        payload["systemInstruction"] = {
+            "parts": [{"text": f"Speak in language locale: {lang}"}]
+        }
+
+    req = Request(
+        request_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urlopen(req, timeout=timeout_seconds) as response:
+            raw = response.read().decode("utf-8")
+    except HTTPError as exc:
+        details = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Gemini TTS HTTP {exc.code}: {details[:300]}")
+    except URLError as exc:
+        raise RuntimeError(f"Gemini TTS network error: {exc}")
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        raise RuntimeError("Gemini TTS returned invalid JSON")
+
+    candidate = (data.get("candidates") or [{}])[0]
+    content = candidate.get("content") or {}
+    parts = content.get("parts") or []
+    inline_part = next((part.get("inlineData") for part in parts if isinstance(part, dict) and part.get("inlineData")), None)
+    if not inline_part:
+        raise RuntimeError("Gemini TTS did not return audio inlineData")
+
+    audio_b64 = str(inline_part.get("data") or "").strip()
+    if not audio_b64:
+        raise RuntimeError("Gemini TTS returned empty audio data")
+
+    mime_type = str(inline_part.get("mimeType") or "").strip() or (
+        "audio/mpeg" if audio_format == "mp3" else "audio/wav"
+    )
+    try:
+        audio_bytes = base64.b64decode(audio_b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise RuntimeError("Gemini TTS returned invalid base64 audio")
+
+    return audio_bytes, mime_type
+
+
+def _openai_tts_request(text, voice_name, audio_format):
+    openai_key = (os.environ.get("OPENAI_API_KEY", "") or "").strip()
+    if not openai_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+
+    model = (os.environ.get("VOICE_TTS_OPENAI_MODEL", "") or "").strip() or "gpt-4o-mini-tts"
+    timeout_seconds = _voice_timeout_seconds()
+    request_url = "https://api.openai.com/v1/audio/speech"
+
+    payload = {
+        "model": model,
+        "voice": voice_name,
+        "input": text,
+        "format": audio_format,
+    }
+
+    req = Request(
+        request_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {openai_key}",
+        },
+        method="POST",
+    )
+
+    try:
+        with urlopen(req, timeout=timeout_seconds) as response:
+            audio_bytes = response.read()
+            mime_type = response.headers.get_content_type() or "audio/mpeg"
+    except HTTPError as exc:
+        details = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"OpenAI TTS HTTP {exc.code}: {details[:300]}")
+    except URLError as exc:
+        raise RuntimeError(f"OpenAI TTS network error: {exc}")
+
+    return audio_bytes, mime_type
 
 
 def build_ai_unavailable_reply(text, has_image):
@@ -2200,6 +2344,56 @@ class StudentHomeworkSubmitView(APIView):
 
         data = HomeworkSubmissionSerializer(submission).data
         return success_response("Homework submitted", {"submission": data}, status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class VoiceTTSView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def post(self, request):
+        text = str(request.data.get("text", "")).strip()
+        lang = str(request.data.get("lang", "")).strip()
+        requested_voice = request.data.get("voice")
+        audio_format = _normalize_voice_format(request.data.get("format"))
+
+        if not text:
+            return error_response("Validation error", {"text": ["Text is required"]}, status.HTTP_400_BAD_REQUEST)
+
+        provider_order_raw = (
+            os.environ.get("VOICE_TTS_PROVIDER_ORDER")
+            or os.environ.get("VOICE_PROVIDER_ORDER")
+            or os.environ.get("AI_PROVIDER")
+            or "gemini,openai"
+        )
+        provider_order = [item.strip().lower() for item in provider_order_raw.split(",") if item.strip()]
+        if not provider_order:
+            provider_order = ["gemini", "openai"]
+
+        last_error = "No voice provider configured"
+        for provider in provider_order:
+            voice_name = _normalize_voice_name(requested_voice, provider)
+            try:
+                if provider == "gemini":
+                    audio_bytes, mime_type = _gemini_tts_request(text, lang, voice_name, audio_format)
+                elif provider == "openai":
+                    audio_bytes, mime_type = _openai_tts_request(text, voice_name, audio_format)
+                else:
+                    continue
+
+                response = HttpResponse(audio_bytes, content_type=mime_type or "audio/mpeg")
+                response["Cache-Control"] = "no-store"
+                response["X-TTS-Provider"] = provider
+                response["X-TTS-Voice"] = voice_name
+                return response
+            except Exception as exc:
+                last_error = str(exc)
+                logger.exception("[VOICE_TTS] provider failed: %s", provider)
+                continue
+
+        return error_response(
+            "Voice TTS provider unavailable",
+            {"tts": [last_error]},
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
 
 
 class AiChatMessagesView(APIView):
