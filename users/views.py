@@ -1308,6 +1308,57 @@ def _telegram_edit_message(chat_id, message_id, text):
     )
 
 
+def _format_group_days(group):
+    if not group:
+        return "-"
+    pattern = str(getattr(group, "days_pattern", "") or "").strip().lower()
+    if pattern == "mwf":
+        return "Mon/Wed/Fri"
+    if pattern == "tts":
+        return "Tue/Thu/Sat"
+    return pattern or "-"
+
+
+def _build_support_ticket_telegram_text(ticket):
+    student = getattr(ticket, "student", None)
+    group = getattr(student, "group", None) if student else None
+    created_at = getattr(ticket, "created_at", None)
+    created_at_text = created_at.strftime("%Y-%m-%d %H:%M") if created_at else "-"
+    teacher_name = getattr(getattr(ticket, "teacher", None), "full_name", "") or "-"
+    return (
+        f"🆘 New support request #{ticket.id}\n"
+        f"Student: {getattr(student, 'full_name', '-')}\n"
+        f"Phone: {getattr(student, 'phone', '-')}\n"
+        f"Level: {getattr(student, 'level', '-')}\n"
+        f"Group: {getattr(group, 'title', '-') if group else '-'}\n"
+        f"Time: {getattr(group, 'time', '-') if group else '-'}\n"
+        f"Days: {_format_group_days(group)}\n"
+        f"Teacher: {teacher_name}\n"
+        f"Created: {created_at_text}\n"
+        f"Problem:\n{getattr(ticket, 'message', '-')}"
+    )
+
+
+def notify_telegram_support_ticket(ticket):
+    token = _telegram_bot_token()
+    chat_ids = _telegram_chat_ids()
+    if not token or not chat_ids:
+        return False
+
+    text = _build_support_ticket_telegram_text(ticket)
+    success = False
+    for chat_id in chat_ids:
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": "true",
+        }
+        result = _telegram_api_call("sendMessage", payload)
+        if result and result.get("ok"):
+            success = True
+    return success
+
+
 class PaymentCreateView(APIView):
     permission_classes = [IsAuthenticatedAndPaid]
 
@@ -2719,8 +2770,9 @@ class SupportTicketListCreateView(APIView):
             teacher=teacher,
             message=message,
         )
+        telegram_notified = notify_telegram_support_ticket(ticket)
         data = SupportTicketSerializer(ticket).data
-        return success_response("Support request created", data, status.HTTP_201_CREATED)
+        return success_response("Support request created", {"ticket": data, "telegramNotified": telegram_notified}, status.HTTP_201_CREATED)
 
 
 class SupportTicketUpdateView(APIView):
