@@ -227,6 +227,21 @@ class AvatarUpdateSerializer(serializers.ModelSerializer):
         model = User
         fields = ("avatar",)
 
+    def validate_avatar(self, value):
+        if not value:
+            return value
+
+        max_bytes = 3 * 1024 * 1024
+        if getattr(value, "size", 0) > max_bytes:
+            raise serializers.ValidationError("Avatar image is too large (max 3MB)")
+
+        content_type = str(getattr(value, "content_type", "") or "").lower()
+        allowed_types = {"image/jpeg", "image/png", "image/webp"}
+        if content_type and content_type not in allowed_types:
+            raise serializers.ValidationError("Only JPG, PNG, and WEBP images are supported")
+
+        return value
+
 
 class TeacherGroupSerializer(serializers.ModelSerializer):
     teacher_id = serializers.IntegerField(source="teacher.id", read_only=True)

@@ -28,6 +28,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from groups.models import Group
@@ -88,6 +89,8 @@ logger = logging.getLogger(__name__)
 ALLOWED_AI_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 DEFAULT_AI_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 DEFAULT_VOICE_TTS_TIMEOUT_SECONDS = 65
+DEFAULT_AVATAR_MAX_IMAGE_BYTES = 3 * 1024 * 1024
+DEFAULT_VOICE_TTS_MAX_TEXT_CHARS = 700
 
 
 def success_response(message, data=None, status_code=status.HTTP_200_OK):
@@ -372,11 +375,11 @@ def to_front_student(request, student, include_phone=True):
     }
 
 
-def to_front_teacher(request, teacher, group_ids):
+def to_front_teacher(request, teacher, group_ids, include_phone=False):
     return {
         "id": str(teacher.id),
         "fullName": teacher.full_name,
-        "phone": teacher.phone,
+        "phone": teacher.phone if include_phone else "",
         "password": "",
         "groupIds": [str(group_id) for group_id in group_ids],
         "avatarUrl": avatar_url(request, teacher),
@@ -515,7 +518,12 @@ def can_user_chat_with_target(user, target):
         if target.role == "teacher":
             return bool(user.group_id and user.group and user.group.teacher_id == target.id)
         if target.role == "student":
-            return target.is_iman_student
+            return bool(
+                user.group_id
+                and target.group_id
+                and user.group_id == target.group_id
+                and target.is_iman_student
+            )
 
     return False
 
@@ -598,6 +606,8 @@ def save_ai_image_from_data_url(image_base64, user):
 
 class RegisterView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth_register"
 
     def post(self, request):
         serializer = RegisterSerializer(data=normalize_register_payload(request.data))
@@ -620,6 +630,8 @@ class RegisterView(APIView):
 
 class LoginView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "auth_login"
 
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
@@ -758,7 +770,14 @@ class UpdateAvatarView(APIView):
                     status.HTTP_400_BAD_REQUEST,
                 )
 
-            mime_type = match.group(1)
+            mime_type = str(match.group(1) or "").lower()
+            if mime_type not in ALLOWED_AI_IMAGE_MIME_TYPES:
+                return error_response(
+                    "Validation error",
+                    {"avatarUrl": ["Only JPG, PNG, and WEBP images are supported"]},
+                    status.HTTP_400_BAD_REQUEST,
+                )
+
             encoded = match.group(2)
             extension = "png"
             if "/" in mime_type:
@@ -767,11 +786,18 @@ class UpdateAvatarView(APIView):
                 extension = "jpg"
 
             try:
-                decoded = base64.b64decode(encoded)
+                decoded = base64.b64decode(encoded, validate=True)
             except (binascii.Error, ValueError):
                 return error_response(
                     "Validation error",
                     {"avatarUrl": ["Invalid base64 data"]},
+                    status.HTTP_400_BAD_REQUEST,
+                )
+
+            if len(decoded) > DEFAULT_AVATAR_MAX_IMAGE_BYTES:
+                return error_response(
+                    "Validation error",
+                    {"avatarUrl": ["Avatar image is too large (max 3MB)"]},
                     status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -1001,14 +1027,19 @@ def parse_click_webhook_payload(payload):
 
 
 def resolve_webhook_secret(request):
-    token = request.headers.get("X-Payment-Secret") or request.headers.get("X-Webhook-Secret")
+    token = (
+        request.headers.get("X-Payment-Secret")
+        or request.headers.get("X-Webhook-Secret")
+        or request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    )
     return str(token or "").strip()
 
 
 def is_valid_webhook_secret(request):
     configured = (os.environ.get("PAYMENT_WEBHOOK_SECRET") or "").strip()
     if not configured:
-        return bool(getattr(settings, "DEBUG", False))
+        allow_insecure = str(os.environ.get("ALLOW_INSECURE_WEBHOOKS", "") or "").strip().lower() in {"1", "true", "yes", "on"}
+        return bool(getattr(settings, "DEBUG", False) and allow_insecure)
     provided = resolve_webhook_secret(request)
     if not provided:
         return False
@@ -1151,15 +1182,17 @@ def _telegram_sign_secret():
 
 def _telegram_sign(action, tx_id, days):
     secret = _telegram_sign_secret()
-    base = f"{action}:{tx_id}:{days}"
     if not secret:
-        return "no-secret"
+        return None
+    base = f"{action}:{tx_id}:{days}"
     digest = hmac.new(secret.encode("utf-8"), base.encode("utf-8"), hashlib.sha256).hexdigest()
     return digest[:16]
 
 
 def _telegram_verify_sign(action, tx_id, days, sign):
     expected = _telegram_sign(action, tx_id, days)
+    if not expected:
+        return False
     return hmac.compare_digest(str(sign or ""), expected)
 
 
@@ -1217,6 +1250,9 @@ def notify_telegram_manual_payment(payment_tx, request):
     days = get_subscription_days()
     approve_sign = _telegram_sign("approve", payment_tx.id, days)
     reject_sign = _telegram_sign("reject", payment_tx.id, days)
+    if not approve_sign or not reject_sign:
+        logger.error("[PAYMENTS][TELEGRAM] callback signing secret is missing")
+        return False
     keyboard = {
         "inline_keyboard": [
             [
@@ -1565,6 +1601,9 @@ class PaymentTelegramWebhookView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
+        if not is_valid_webhook_secret(request):
+            return error_response("Unauthorized", {"secret": ["Invalid webhook secret"]}, status.HTTP_401_UNAUTHORIZED)
+
         update = request.data if isinstance(request.data, dict) else {}
         callback_query = update.get("callback_query") if isinstance(update, dict) else None
         if not isinstance(callback_query, dict):
@@ -1821,6 +1860,7 @@ class PlatformStateView(APIView):
                     request,
                     teacher,
                     teacher.teaching_groups.values_list("id", flat=True),
+                    include_phone=request.user.role == "teacher",
                 )
                 for teacher in teachers
             ]
@@ -2347,18 +2387,25 @@ class StudentHomeworkSubmitView(APIView):
 
 
 class VoiceTTSView(APIView):
-    # Public access to avoid frontend auth mismatch and 401 in voice mode.
-    # Important: this can increase provider costs if abused.
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticatedAndPaid]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "voice_tts"
 
     def post(self, request):
         text = str(request.data.get("text", "")).strip()
         lang = str(request.data.get("lang", "")).strip()
         requested_voice = request.data.get("voice")
         audio_format = _normalize_voice_format(request.data.get("format"))
+        max_text_chars = get_env_int("VOICE_TTS_MAX_TEXT_CHARS", DEFAULT_VOICE_TTS_MAX_TEXT_CHARS)
 
         if not text:
             return error_response("Validation error", {"text": ["Text is required"]}, status.HTTP_400_BAD_REQUEST)
+        if len(text) > max_text_chars:
+            return error_response(
+                "Validation error",
+                {"text": [f"Text is too long (max {max_text_chars} chars)"]},
+                status.HTTP_400_BAD_REQUEST,
+            )
 
         provider_order_raw = (
             os.environ.get("VOICE_TTS_PROVIDER_ORDER")

@@ -1,5 +1,6 @@
 ﻿from django.db import models
 from django.contrib.auth.models import AbstractUser, BaseUserManager
+from django.core.validators import FileExtensionValidator
 
 
 def _normalize_phone(value):
@@ -61,7 +62,12 @@ class User(AbstractUser):
 
     full_name = models.CharField(max_length=255)
     phone = models.CharField(max_length=20, unique=True)
-    avatar = models.FileField(upload_to="avatars/", blank=True, null=True)
+    avatar = models.FileField(
+        upload_to="avatars/",
+        blank=True,
+        null=True,
+        validators=[FileExtensionValidator(["jpg", "jpeg", "png", "webp"])],
+    )
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
     is_paid = models.BooleanField(default=False)
     paid_until = models.DateTimeField(blank=True, null=True)

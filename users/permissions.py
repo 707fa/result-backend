@@ -24,8 +24,6 @@ class IsAuthenticatedAndPaid(BasePermission):
         path = request.path.rstrip("/").lower()
 
         free_paths = (
-            "/platform/state",
-            "/api/platform/state",
             "/ratings/global",
             "/api/ratings/global",
             "/ratings/group",

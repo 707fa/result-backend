@@ -14,6 +14,8 @@ from pathlib import Path
 import ast
 import json
 import os
+import secrets
+import sys
 import dj_database_url
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -49,12 +51,6 @@ def load_local_env(base_dir):
 
 load_local_env(BASE_DIR)
 
-SECRET_KEY = os.environ.get(
-    "SECRET_KEY",
-    "django-insecure-$df@^i_y!ajgzk_j1(0^692yup&^v!s0+41)g_v-a8j&e)u-#s",
-)
-
-
 def get_env_bool(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -62,7 +58,16 @@ def get_env_bool(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+IS_TEST = "test" in sys.argv
 DEBUG = get_env_bool("DEBUG", False)
+
+secret_from_env = str(os.environ.get("SECRET_KEY", "") or "").strip()
+if secret_from_env:
+    SECRET_KEY = secret_from_env
+elif DEBUG or IS_TEST:
+    SECRET_KEY = f"dev-insecure-{secrets.token_urlsafe(48)}"
+else:
+    raise RuntimeError("SECRET_KEY is required in production")
 
 
 def _clean_origin(value):
@@ -118,18 +123,18 @@ CORS_ALLOWED_ORIGIN_REGEXES = [r"^https://.*\.vercel\.app$"]
 
 # Security hardening (safe defaults for production)
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
-SECURE_SSL_REDIRECT = get_env_bool("SECURE_SSL_REDIRECT", not DEBUG)
-SESSION_COOKIE_SECURE = get_env_bool("SESSION_COOKIE_SECURE", not DEBUG)
-CSRF_COOKIE_SECURE = get_env_bool("CSRF_COOKIE_SECURE", not DEBUG)
+SECURE_SSL_REDIRECT = get_env_bool("SECURE_SSL_REDIRECT", not (DEBUG or IS_TEST))
+SESSION_COOKIE_SECURE = get_env_bool("SESSION_COOKIE_SECURE", not (DEBUG or IS_TEST))
+CSRF_COOKIE_SECURE = get_env_bool("CSRF_COOKIE_SECURE", not (DEBUG or IS_TEST))
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = os.environ.get("SESSION_COOKIE_SAMESITE", "Lax")
 CSRF_COOKIE_SAMESITE = os.environ.get("CSRF_COOKIE_SAMESITE", "Lax")
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = "DENY"
 SECURE_REFERRER_POLICY = os.environ.get("SECURE_REFERRER_POLICY", "same-origin")
-SECURE_HSTS_SECONDS = int(os.environ.get("SECURE_HSTS_SECONDS", "0" if DEBUG else "31536000"))
-SECURE_HSTS_INCLUDE_SUBDOMAINS = get_env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", not DEBUG)
-SECURE_HSTS_PRELOAD = get_env_bool("SECURE_HSTS_PRELOAD", not DEBUG)
+SECURE_HSTS_SECONDS = int(os.environ.get("SECURE_HSTS_SECONDS", "0" if (DEBUG or IS_TEST) else "31536000"))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = get_env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", not (DEBUG or IS_TEST))
+SECURE_HSTS_PRELOAD = get_env_bool("SECURE_HSTS_PRELOAD", not (DEBUG or IS_TEST))
 
 # Guaranteed production frontend origin (Vercel).
 VERCEL_FRONTEND_ORIGIN = "https://iman-bakhruz.vercel.app"
@@ -235,6 +240,18 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticated",
     ),
+    "DEFAULT_THROTTLE_CLASSES": (
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+        "rest_framework.throttling.ScopedRateThrottle",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": os.environ.get("DRF_THROTTLE_ANON", "60/min"),
+        "user": os.environ.get("DRF_THROTTLE_USER", "240/min"),
+        "auth_login": os.environ.get("DRF_THROTTLE_AUTH_LOGIN", "8/min"),
+        "auth_register": os.environ.get("DRF_THROTTLE_AUTH_REGISTER", "4/min"),
+        "voice_tts": os.environ.get("DRF_THROTTLE_VOICE_TTS", "20/min"),
+    },
 }
 
 if DEBUG:
@@ -259,8 +276,8 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 from datetime import timedelta
 
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(hours=12),   # рџ‘‰ Р±С‹Р»Рѕ 5-15 РјРёРЅСѓС‚
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),    # рџ‘‰ refresh Р¶РёРІРµС‚ РґРѕР»СЊС€Рµ
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=int(os.environ.get("JWT_ACCESS_MINUTES", "60"))),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=int(os.environ.get("JWT_REFRESH_DAYS", "7"))),
 }
 
 STATICFILES_DIRS = [BASE_DIR / "static"]

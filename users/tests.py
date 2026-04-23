@@ -46,7 +46,7 @@ class BackendSmokeTests(TestCase):
 
     def auth(self, phone, password):
         response = self.client.post(
-            "/auth/login",
+            "/api/auth/login",
             {"phone": phone, "password": password},
             format="json",
         )
@@ -56,7 +56,7 @@ class BackendSmokeTests(TestCase):
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
 
     def test_health_endpoint_public(self):
-        response = self.client.get("/health")
+        response = self.client.get("/api/health")
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data["success"])
         self.assertIn("database", response.data["data"])
@@ -71,7 +71,7 @@ class BackendSmokeTests(TestCase):
             "time": "15:30",
             "days_pattern": "M/W/F",
         }
-        response = self.client.post("/auth/register", payload, format="json")
+        response = self.client.post("/api/auth/register", payload, format="json")
         self.assertEqual(response.status_code, 201)
         created = User.objects.get(phone="+998971112233")
         self.assertEqual(created.group_id, self.group.id)
@@ -79,7 +79,7 @@ class BackendSmokeTests(TestCase):
 
     def test_login_accepts_phone_variants(self):
         response = self.client.post(
-            "/auth/login",
+            "/api/auth/login",
             {"phone": "909000001", "password": "Pass12345!"},
             format="json",
         )
@@ -91,7 +91,7 @@ class BackendSmokeTests(TestCase):
         self.student.save(update_fields=["is_paid"])
         self.auth("+998909000002", "Pass12345!")
         response = self.client.post(
-            "/chat/ai/messages",
+            "/api/chat/ai/messages",
             {"text": "check this", "imageBase64": "bad-image"},
             format="json",
         )
@@ -101,7 +101,7 @@ class BackendSmokeTests(TestCase):
     def test_ai_chat_requires_paid_subscription_for_student(self):
         self.auth("+998909000002", "Pass12345!")
         response = self.client.post(
-            "/chat/ai/messages",
+            "/api/chat/ai/messages",
             {"text": "hello"},
             format="json",
         )
@@ -109,7 +109,7 @@ class BackendSmokeTests(TestCase):
 
     def test_global_rating_excludes_inactive_students(self):
         self.auth("+998909000001", "Pass12345!")
-        response = self.client.get("/ratings/global")
+        response = self.client.get("/api/ratings/global")
         self.assertEqual(response.status_code, 200)
         names = [item["full_name"] for item in response.data["data"]]
         self.assertIn("Student One", names)
