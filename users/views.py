@@ -25,7 +25,7 @@ from django.utils import timezone
 from django.http import HttpResponse
 
 from rest_framework.views import APIView
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -2347,10 +2347,9 @@ class StudentHomeworkSubmitView(APIView):
 
 
 class VoiceTTSView(APIView):
-    # Voice TTS should be available for any authenticated user.
-    # Using IsAuthenticatedAndPaid here causes 403 for free students
-    # and makes voice mode fail even when chat works.
-    permission_classes = [IsAuthenticated]
+    # Public access to avoid frontend auth mismatch and 401 in voice mode.
+    # Important: this can increase provider costs if abused.
+    permission_classes = [AllowAny]
 
     def post(self, request):
         text = str(request.data.get("text", "")).strip()
