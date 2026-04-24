@@ -153,6 +153,33 @@ class SupportTicket(models.Model):
         return f"Support #{self.id} ({self.status})"
 
 
+class SupportTicketMessage(models.Model):
+    SENDER_CHOICES = (
+        ("student", "Student"),
+        ("teacher", "Teacher"),
+        ("support", "Support"),
+    )
+
+    SOURCE_CHOICES = (
+        ("web", "Web"),
+        ("telegram", "Telegram"),
+    )
+
+    ticket = models.ForeignKey("users.SupportTicket", on_delete=models.CASCADE, related_name="messages")
+    sender_type = models.CharField(max_length=20, choices=SENDER_CHOICES)
+    text = models.TextField(max_length=2000)
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default="web")
+    read_by_student_at = models.DateTimeField(blank=True, null=True)
+    read_by_support_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+
+    def __str__(self):
+        return f"SupportMessage #{self.id} ({self.sender_type})"
+
+
 class AiConversation(models.Model):
     user = models.OneToOneField("users.User", on_delete=models.CASCADE, related_name="ai_conversation")
     created_at = models.DateTimeField(auto_now_add=True)

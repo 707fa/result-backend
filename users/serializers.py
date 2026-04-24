@@ -7,6 +7,7 @@ from ratings.models import ScoreLog
 from .models import (
     GrammarTopic,
     SupportTicket,
+    SupportTicketMessage,
     AiConversation,
     AiMessage,
     FriendlyConversation,
@@ -410,6 +411,29 @@ class SupportTicketSerializer(serializers.ModelSerializer):
             "updated_at",
         )
         read_only_fields = ("student", "teacher", "status", "teacher_reply", "teacher_reply_at")
+
+
+class SupportTicketMessageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SupportTicketMessage
+        fields = (
+            "id",
+            "ticket",
+            "sender_type",
+            "text",
+            "source",
+            "read_by_student_at",
+            "read_by_support_at",
+            "created_at",
+        )
+        read_only_fields = (
+            "ticket",
+            "sender_type",
+            "source",
+            "read_by_student_at",
+            "read_by_support_at",
+            "created_at",
+        )
 
 
 class SupportTicketUpdateSerializer(serializers.ModelSerializer):

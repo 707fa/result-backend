@@ -37,6 +37,7 @@ from .models import (
     User,
     GrammarTopic,
     SupportTicket,
+    SupportTicketMessage,
     AiConversation,
     AiMessage,
     FriendlyConversation,
@@ -61,6 +62,7 @@ from .serializers import (
     ProgressUpdateSerializer,
     GrammarTopicSerializer,
     SupportTicketSerializer,
+    SupportTicketMessageSerializer,
     SupportTicketUpdateSerializer,
     AiMessageSerializer,
     AiConversationSerializer,
@@ -1365,6 +1367,36 @@ def notify_telegram_support_ticket(ticket):
     return success
 
 
+def notify_telegram_support_message(ticket, message_text):
+    token = _telegram_bot_token()
+    chat_ids = _telegram_chat_ids()
+    if not token or not chat_ids:
+        return False
+
+    student = getattr(ticket, "student", None)
+    text = (
+        f"💬 Support update for ticket #{ticket.id}\n"
+        f"Ticket ID: {ticket.id}\n"
+        f"Student: {getattr(student, 'full_name', '-')}\n"
+        f"Phone: {getattr(student, 'phone', '-')}\n"
+        f"Message:\n{str(message_text or '').strip()}"
+    )
+
+    success = False
+    for chat_id in chat_ids:
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": "true",
+        }
+        if ticket.telegram_message_id:
+            payload["reply_to_message_id"] = str(ticket.telegram_message_id)
+        result = _telegram_api_call("sendMessage", payload)
+        if result and result.get("ok"):
+            success = True
+    return success
+
+
 def _extract_support_ticket_id_from_reply(reply_message):
     if not isinstance(reply_message, dict):
         return None
@@ -1695,9 +1727,25 @@ class PaymentTelegramWebhookView(APIView):
                 if ticket_id and reply_text:
                     ticket = SupportTicket.objects.filter(id=ticket_id).select_related("teacher").first()
                     if ticket and (not ticket.telegram_chat_id or str(ticket.telegram_chat_id) == chat_id):
+                        now = timezone.now()
+                        reply_body = reply_text[:2000]
+                        SupportTicketMessage.objects.create(
+                            ticket=ticket,
+                            sender_type="support",
+                            text=reply_body,
+                            source="telegram",
+                            read_by_support_at=now,
+                        )
+
+                        SupportTicketMessage.objects.filter(
+                            ticket=ticket,
+                            sender_type="student",
+                            read_by_support_at__isnull=True,
+                        ).update(read_by_support_at=now)
+
                         update_fields = ["teacher_reply", "teacher_reply_at", "updated_at"]
-                        ticket.teacher_reply = reply_text[:2000]
-                        ticket.teacher_reply_at = timezone.now()
+                        ticket.teacher_reply = reply_body
+                        ticket.teacher_reply_at = now
                         if ticket.status == "open":
                             ticket.status = "in_progress"
                             update_fields.append("status")
@@ -2818,9 +2866,103 @@ class SupportTicketListCreateView(APIView):
             teacher=teacher,
             message=message,
         )
+        SupportTicketMessage.objects.create(
+            ticket=ticket,
+            sender_type="student",
+            text=message,
+            source="web",
+            read_by_student_at=timezone.now(),
+        )
         telegram_notified = notify_telegram_support_ticket(ticket)
         data = SupportTicketSerializer(ticket).data
         return success_response("Support request created", {"ticket": data, "telegramNotified": telegram_notified}, status.HTTP_201_CREATED)
+
+
+class SupportTicketMessagesView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def get_ticket_for_user(self, request, ticket_id):
+        if request.user.role == "teacher":
+            return get_object_or_404(
+                SupportTicket.objects.select_related("teacher", "student"),
+                id=ticket_id,
+                teacher=request.user,
+            )
+        return get_object_or_404(
+            SupportTicket.objects.select_related("teacher", "student"),
+            id=ticket_id,
+            student=request.user,
+        )
+
+    def get(self, request, ticket_id):
+        ticket = self.get_ticket_for_user(request, ticket_id)
+        now = timezone.now()
+
+        if request.user.role == "student":
+            SupportTicketMessage.objects.filter(
+                ticket=ticket,
+                sender_type__in=["teacher", "support"],
+                read_by_student_at__isnull=True,
+            ).update(read_by_student_at=now)
+        else:
+            SupportTicketMessage.objects.filter(
+                ticket=ticket,
+                sender_type="student",
+                read_by_support_at__isnull=True,
+            ).update(read_by_support_at=now)
+
+        messages = SupportTicketMessage.objects.filter(ticket=ticket).order_by("created_at")
+        data = SupportTicketMessageSerializer(messages, many=True).data
+        return success_response("Support messages fetched", {"ticketId": ticket.id, "messages": data})
+
+    def post(self, request, ticket_id):
+        ticket = self.get_ticket_for_user(request, ticket_id)
+        text = str(request.data.get("text") or "").strip()
+        if len(text) < 1:
+            return error_response("Validation error", {"text": ["Message is required"]}, status.HTTP_400_BAD_REQUEST)
+        if len(text) > 2000:
+            return error_response("Validation error", {"text": ["Message is too long"]}, status.HTTP_400_BAD_REQUEST)
+
+        now = timezone.now()
+        if request.user.role == "student":
+            sender_type = "student"
+            read_by_student_at = now
+            read_by_support_at = None
+            ticket.message = text
+            ticket.save(update_fields=["message", "updated_at"])
+        else:
+            sender_type = "teacher"
+            read_by_student_at = None
+            read_by_support_at = now
+            ticket.teacher_reply = text
+            ticket.teacher_reply_at = now
+            ticket.status = "in_progress" if ticket.status == "open" else ticket.status
+            ticket.save(update_fields=["teacher_reply", "teacher_reply_at", "status", "updated_at"])
+
+            SupportTicketMessage.objects.filter(
+                ticket=ticket,
+                sender_type="student",
+                read_by_support_at__isnull=True,
+            ).update(read_by_support_at=now)
+
+        message = SupportTicketMessage.objects.create(
+            ticket=ticket,
+            sender_type=sender_type,
+            text=text,
+            source="web",
+            read_by_student_at=read_by_student_at,
+            read_by_support_at=read_by_support_at,
+        )
+
+        telegram_notified = False
+        if request.user.role == "student":
+            telegram_notified = notify_telegram_support_message(ticket, text)
+
+        payload = {
+            "message": SupportTicketMessageSerializer(message).data,
+            "telegramNotified": telegram_notified,
+        }
+        return success_response("Support message sent", payload, status.HTTP_201_CREATED)
 
 
 class SupportTicketUpdateView(APIView):

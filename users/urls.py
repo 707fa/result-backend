@@ -23,6 +23,7 @@ from .views import (
     FriendlyConversationMessagesView,
     GrammarTopicsView,
     SupportTicketListCreateView,
+    SupportTicketMessagesView,
     SupportTicketUpdateView,
     PaymentCreateView,
     PaymentManualReceiptUploadView,
@@ -96,6 +97,7 @@ urlpatterns = [
     path("grammar/topics", GrammarTopicsView.as_view(), name="grammar-topics"),
 
     path("support/tickets", SupportTicketListCreateView.as_view(), name="support-tickets"),
+    path("support/tickets/<int:ticket_id>/messages", SupportTicketMessagesView.as_view(), name="support-ticket-messages"),
     path("support/tickets/<int:ticket_id>", SupportTicketUpdateView.as_view(), name="support-ticket-update"),
 
     path("teacher/homework/tasks", TeacherHomeworkTasksView.as_view(), name="teacher-homework-tasks"),
