@@ -403,11 +403,13 @@ class SupportTicketSerializer(serializers.ModelSerializer):
             "teacher",
             "teacher_name",
             "message",
+            "teacher_reply",
+            "teacher_reply_at",
             "status",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("student", "teacher", "status")
+        read_only_fields = ("student", "teacher", "status", "teacher_reply", "teacher_reply_at")
 
 
 class SupportTicketUpdateSerializer(serializers.ModelSerializer):

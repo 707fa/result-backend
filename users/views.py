@@ -1327,6 +1327,7 @@ def _build_support_ticket_telegram_text(ticket):
     teacher_name = getattr(getattr(ticket, "teacher", None), "full_name", "") or "-"
     return (
         f"🆘 New support request #{ticket.id}\n"
+        f"Ticket ID: {ticket.id}\n"
         f"Student: {getattr(student, 'full_name', '-')}\n"
         f"Phone: {getattr(student, 'phone', '-')}\n"
         f"Level: {getattr(student, 'level', '-')}\n"
@@ -1356,7 +1357,34 @@ def notify_telegram_support_ticket(ticket):
         result = _telegram_api_call("sendMessage", payload)
         if result and result.get("ok"):
             success = True
+            message = result.get("result") or {}
+            if not getattr(ticket, "telegram_chat_id", "") or not getattr(ticket, "telegram_message_id", ""):
+                ticket.telegram_chat_id = str(chat_id)
+                ticket.telegram_message_id = str(message.get("message_id") or "")
+                ticket.save(update_fields=["telegram_chat_id", "telegram_message_id"])
     return success
+
+
+def _extract_support_ticket_id_from_reply(reply_message):
+    if not isinstance(reply_message, dict):
+        return None
+    text = str(reply_message.get("text") or "")
+    if not text:
+        return None
+    # Preferred marker
+    marker = re.search(r"Ticket ID:\s*(\d+)", text, flags=re.IGNORECASE)
+    if marker:
+        return int(marker.group(1))
+    # Fallback for older messages
+    fallback = re.search(r"support request #(\d+)", text, flags=re.IGNORECASE)
+    if fallback:
+        return int(fallback.group(1))
+    return None
+
+
+def _can_accept_telegram_support_reply(chat_id):
+    allowed = {str(item) for item in _telegram_chat_ids()}
+    return str(chat_id or "") in allowed
 
 
 class PaymentCreateView(APIView):
@@ -1656,6 +1684,26 @@ class PaymentTelegramWebhookView(APIView):
             return error_response("Unauthorized", {"secret": ["Invalid webhook secret"]}, status.HTTP_401_UNAUTHORIZED)
 
         update = request.data if isinstance(request.data, dict) else {}
+        message_update = update.get("message") if isinstance(update, dict) else None
+        if isinstance(message_update, dict):
+            chat = message_update.get("chat") if isinstance(message_update.get("chat"), dict) else {}
+            chat_id = str(chat.get("id") or "")
+            if _can_accept_telegram_support_reply(chat_id):
+                replied_to = message_update.get("reply_to_message") if isinstance(message_update.get("reply_to_message"), dict) else None
+                ticket_id = _extract_support_ticket_id_from_reply(replied_to)
+                reply_text = str(message_update.get("text") or "").strip()
+                if ticket_id and reply_text:
+                    ticket = SupportTicket.objects.filter(id=ticket_id).select_related("teacher").first()
+                    if ticket and (not ticket.telegram_chat_id or str(ticket.telegram_chat_id) == chat_id):
+                        update_fields = ["teacher_reply", "teacher_reply_at", "updated_at"]
+                        ticket.teacher_reply = reply_text[:2000]
+                        ticket.teacher_reply_at = timezone.now()
+                        if ticket.status == "open":
+                            ticket.status = "in_progress"
+                            update_fields.append("status")
+                        ticket.save(update_fields=update_fields)
+                        return success_response("Support reply synced", {"ticketId": ticket.id, "synced": True})
+
         callback_query = update.get("callback_query") if isinstance(update, dict) else None
         if not isinstance(callback_query, dict):
             return success_response("Ignored", {"ok": True})
