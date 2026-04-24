@@ -208,6 +208,32 @@ def _build_context_instruction(level="", language="", group_title="", group_time
     return "\n".join(lines), normalized_level, reply_language
 
 
+def _word_limit_instruction(max_words):
+    try:
+        value = int(max_words)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    return (
+        f"Keep the main answer concise: around {value} words (hard max {value + 20}). "
+        "Use short paragraphs and avoid repetition."
+    )
+
+
+def _trim_to_word_limit(text, max_words):
+    try:
+        value = int(max_words)
+    except (TypeError, ValueError):
+        return text
+    if value <= 0:
+        return text
+    words = str(text or "").split()
+    if len(words) <= value:
+        return str(text or "").strip()
+    return " ".join(words[:value]).strip()
+
+
 def _generate_with_openai(user_text, image_data_url, system_prompt=AI_SYSTEM_PROMPT):
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     model = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
@@ -359,10 +385,12 @@ def generate_iman_ai_reply(
     group_title="",
     group_time="",
     system_context="",
+    provider_order=None,
+    max_words=None,
+    response_mode="chat",
 ):
     user_text = (text or "").strip()
     has_image = bool(image_data_url and str(image_data_url).strip())
-    provider = (os.environ.get("AI_PROVIDER", "gemini") or "gemini").strip().lower()
     context_instruction, _, _ = _build_context_instruction(
         level=level,
         language=language,
@@ -370,26 +398,43 @@ def generate_iman_ai_reply(
         group_time=group_time,
         system_context=system_context,
     )
-    system_prompt = f"{AI_SYSTEM_PROMPT}\n\n{context_instruction}".strip()
+    instructions = [AI_SYSTEM_PROMPT, context_instruction]
+    if response_mode != "json":
+        limit_instruction = _word_limit_instruction(max_words)
+        if limit_instruction:
+            instructions.append(limit_instruction)
+    system_prompt = "\n\n".join(part for part in instructions if part).strip()
 
-    if provider == "openai":
-        reply = _generate_with_openai(user_text, image_data_url, system_prompt=system_prompt)
+    if provider_order is None:
+        configured = str(os.environ.get("AI_PROVIDER_ORDER", "") or "").strip().lower()
+        if configured:
+            provider_order = [item.strip() for item in configured.split(",") if item.strip()]
+        else:
+            default_provider = (os.environ.get("AI_PROVIDER", "gemini") or "gemini").strip().lower()
+            provider_order = [default_provider, "openai" if default_provider == "gemini" else "gemini"]
+
+    normalized_order = []
+    for provider in provider_order:
+        key = str(provider or "").strip().lower()
+        if key in {"gemini", "openai"} and key not in normalized_order:
+            normalized_order.append(key)
+    if not normalized_order:
+        normalized_order = ["gemini", "openai"]
+
+    for provider in normalized_order:
+        if provider == "gemini":
+            reply = _generate_with_gemini(user_text, image_data_url, system_prompt=system_prompt)
+        else:
+            reply = _generate_with_openai(user_text, image_data_url, system_prompt=system_prompt)
         if reply:
-            return reply
-        reply = _generate_with_gemini(user_text, image_data_url, system_prompt=system_prompt)
-        if reply:
-            return reply
-        return _mock_reply(user_text, has_image)
+            if response_mode == "json":
+                return reply
+            return _trim_to_word_limit(reply, max_words)
 
-    # default: gemini
-    reply = _generate_with_gemini(user_text, image_data_url, system_prompt=system_prompt)
-    if reply:
-        return reply
-    reply = _generate_with_openai(user_text, image_data_url, system_prompt=system_prompt)
-    if reply:
-        return reply
-
-    return _mock_reply(user_text, has_image)
+    fallback = _mock_reply(user_text, has_image)
+    if response_mode == "json":
+        return fallback
+    return _trim_to_word_limit(fallback, max_words)
 
 
 def _extract_json_payload(raw_text):
@@ -500,6 +545,7 @@ def generate_speaking_analysis(question, transcript, level="", language="", grou
         language=reply_language,
         group_title=group_title,
         group_time=group_time,
+        response_mode="json",
     )
 
     parsed = _extract_json_payload(raw_reply)

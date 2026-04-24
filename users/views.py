@@ -22,7 +22,7 @@ from django.db.models import Count
 from django.core.files.base import ContentFile
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from django.http import HttpResponse
+from django.http import HttpResponse, StreamingHttpResponse
 
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
@@ -93,6 +93,7 @@ DEFAULT_AI_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 DEFAULT_VOICE_TTS_TIMEOUT_SECONDS = 65
 DEFAULT_AVATAR_MAX_IMAGE_BYTES = 3 * 1024 * 1024
 DEFAULT_VOICE_TTS_MAX_TEXT_CHARS = 700
+DEFAULT_AI_CHAT_MAX_WORDS = 110
 
 
 def success_response(message, data=None, status_code=status.HTTP_200_OK):
@@ -231,6 +232,40 @@ def _gemini_tts_request(text, lang, voice_name, audio_format):
         headers={"Content-Type": "application/json"},
         method="POST",
     )
+
+
+def _resolve_ai_chat_provider_order():
+    configured = str(os.environ.get("AI_CHAT_PROVIDER_ORDER", "") or "").strip().lower()
+    if configured:
+        result = []
+        for item in configured.split(","):
+            value = item.strip()
+            if value in {"gemini", "openai"} and value not in result:
+                result.append(value)
+        if result:
+            return result
+    return ["gemini", "openai"]
+
+
+def _resolve_ai_chat_max_words():
+    return get_env_int("AI_CHAT_MAX_WORDS", DEFAULT_AI_CHAT_MAX_WORDS)
+
+
+def _split_stream_chunks(text, chunk_size=18):
+    content = str(text or "").strip()
+    if not content:
+        return []
+    chunks = []
+    index = 0
+    step = max(6, int(chunk_size))
+    while index < len(content):
+        chunks.append(content[index : index + step])
+        index += step
+    return chunks
+
+
+def _sse_event(event_name, payload):
+    return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     try:
         with urlopen(req, timeout=timeout_seconds) as response:
@@ -2661,6 +2696,9 @@ class AiChatMessagesView(APIView):
                 group_title=group_title,
                 group_time=group_time,
                 system_context=system_context,
+                provider_order=_resolve_ai_chat_provider_order(),
+                max_words=_resolve_ai_chat_max_words(),
+                response_mode="chat",
             )
         except Exception:
             logger.exception("[IMAN_AI] unexpected provider failure")
@@ -2692,6 +2730,111 @@ class AiChatMessagesView(APIView):
             "lastAssistantMessage": AiMessageSerializer(assistant_message, context={"request": request}).data,
         }
         return success_response("AI reply generated", payload, status.HTTP_201_CREATED)
+
+
+class AiChatMessagesStreamView(APIView):
+    permission_classes = [IsAuthenticatedAndPaid]
+
+    def post(self, request):
+        serializer = AiSendMessageSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response("Validation error", serializer.errors, status.HTTP_400_BAD_REQUEST)
+
+        conversation, _ = AiConversation.objects.get_or_create(user=request.user)
+        text = serializer.validated_data.get("text", "")
+        image_base64 = serializer.validated_data.get("imageBase64", "")
+        level = serializer.validated_data.get("level", "")
+        language = serializer.validated_data.get("language", "")
+        group_title = serializer.validated_data.get("groupTitle", "")
+        group_time = serializer.validated_data.get("groupTime", "")
+        system_context = serializer.validated_data.get("systemContext", "")
+
+        user_message = AiMessage.objects.create(
+            conversation=conversation,
+            role="user",
+            text=text,
+        )
+
+        try:
+            saved_image = save_ai_image_from_data_url(image_base64, request.user)
+        except ValueError as exc:
+            return error_response(
+                "Validation error",
+                {"imageBase64": [str(exc)]},
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        if saved_image:
+            filename, content = saved_image
+            user_message.image.save(filename, content, save=True)
+
+        if not level and request.user.group_id:
+            try:
+                group_value = request.user.group.title.lower()
+                if "beginner" in group_value:
+                    level = "beginner"
+                elif "elementary" in group_value:
+                    level = "elementary"
+                elif "pre" in group_value and "inter" in group_value:
+                    level = "pre-intermediate"
+                elif "intermediate" in group_value:
+                    level = "intermediate"
+            except Exception:
+                level = level or ""
+
+        if not group_title and request.user.group_id:
+            group_title = request.user.group.title
+        if not group_time and request.user.group_id:
+            group_time = request.user.group.time
+
+        def event_stream():
+            yield _sse_event("start", {"conversationId": conversation.id, "userMessageId": user_message.id})
+
+            try:
+                reply = generate_iman_ai_reply(
+                    text=text,
+                    image_data_url=image_base64,
+                    level=level,
+                    language=language,
+                    group_title=group_title,
+                    group_time=group_time,
+                    system_context=system_context,
+                    provider_order=_resolve_ai_chat_provider_order(),
+                    max_words=_resolve_ai_chat_max_words(),
+                    response_mode="chat",
+                )
+            except Exception:
+                logger.exception("[IMAN_AI_STREAM] unexpected provider failure")
+                reply = build_ai_unavailable_reply(text, bool(image_base64))
+
+            for chunk in _split_stream_chunks(reply):
+                yield _sse_event("delta", {"text": chunk})
+
+            assistant_message = AiMessage.objects.create(
+                conversation=conversation,
+                role="assistant",
+                text=reply,
+            )
+
+            if request.user.role == "student":
+                try:
+                    update_student_progress_from_ai_chat(
+                        request.user,
+                        user_text=text,
+                        has_image=bool(image_base64),
+                        assistant_reply=reply,
+                    )
+                except Exception:
+                    logger.exception("[IMAN_AI_STREAM] progress update failed")
+
+            conversation.save(update_fields=["updated_at"])
+            assistant_payload = AiMessageSerializer(assistant_message, context={"request": request}).data
+            yield _sse_event("done", {"assistantMessage": assistant_payload, "conversationId": conversation.id})
+
+        response = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
+        response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"
+        return response
 
 
 class AiSpeakingCheckView(APIView):
