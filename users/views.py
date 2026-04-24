@@ -1233,6 +1233,22 @@ def _telegram_verify_sign(action, tx_id, days, sign):
     return hmac.compare_digest(str(sign or ""), expected)
 
 
+def is_valid_telegram_webhook_secret(request):
+    configured = str(os.environ.get("TELEGRAM_BOT_SECRET") or os.environ.get("PAYMENT_WEBHOOK_SECRET") or "").strip()
+    if not configured:
+        allow_insecure = str(os.environ.get("ALLOW_INSECURE_WEBHOOKS", "") or "").strip().lower() in {"1", "true", "yes", "on"}
+        return settings.DEBUG or allow_insecure
+
+    provided = (
+        request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+        or request.headers.get("X-Webhook-Secret")
+        or request.headers.get("X-WEBHOOK-SECRET")
+    )
+    if not provided:
+        return False
+    return hmac.compare_digest(str(provided), configured)
+
+
 def _telegram_api_call(method, payload):
     token = _telegram_bot_token()
     if not token:
@@ -1395,10 +1411,9 @@ def notify_telegram_support_ticket(ticket):
         if result and result.get("ok"):
             success = True
             message = result.get("result") or {}
-            if not getattr(ticket, "telegram_chat_id", "") or not getattr(ticket, "telegram_message_id", ""):
-                ticket.telegram_chat_id = str(chat_id)
-                ticket.telegram_message_id = str(message.get("message_id") or "")
-                ticket.save(update_fields=["telegram_chat_id", "telegram_message_id"])
+            ticket.telegram_chat_id = str(chat_id)
+            ticket.telegram_message_id = str(message.get("message_id") or "")
+            ticket.save(update_fields=["telegram_chat_id", "telegram_message_id"])
     return success
 
 
@@ -1429,6 +1444,10 @@ def notify_telegram_support_message(ticket, message_text):
         result = _telegram_api_call("sendMessage", payload)
         if result and result.get("ok"):
             success = True
+            message = result.get("result") or {}
+            ticket.telegram_chat_id = str(chat_id)
+            ticket.telegram_message_id = str(message.get("message_id") or ticket.telegram_message_id or "")
+            ticket.save(update_fields=["telegram_chat_id", "telegram_message_id"])
     return success
 
 
@@ -1444,6 +1463,19 @@ def _extract_support_ticket_id_from_reply(reply_message):
         return int(marker.group(1))
     # Fallback for older messages
     fallback = re.search(r"support request #(\d+)", text, flags=re.IGNORECASE)
+    if fallback:
+        return int(fallback.group(1))
+    return None
+
+
+def _extract_support_ticket_id_from_text(value):
+    text = str(value or "")
+    if not text:
+        return None
+    marker = re.search(r"Ticket ID:\s*(\d+)", text, flags=re.IGNORECASE)
+    if marker:
+        return int(marker.group(1))
+    fallback = re.search(r"(?:ticket|request|support)\s*#\s*(\d+)", text, flags=re.IGNORECASE)
     if fallback:
         return int(fallback.group(1))
     return None
@@ -1747,7 +1779,7 @@ class PaymentTelegramWebhookView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        if not is_valid_webhook_secret(request):
+        if not is_valid_telegram_webhook_secret(request):
             return error_response("Unauthorized", {"secret": ["Invalid webhook secret"]}, status.HTTP_401_UNAUTHORIZED)
 
         update = request.data if isinstance(request.data, dict) else {}
@@ -1757,8 +1789,25 @@ class PaymentTelegramWebhookView(APIView):
             chat_id = str(chat.get("id") or "")
             if _can_accept_telegram_support_reply(chat_id):
                 replied_to = message_update.get("reply_to_message") if isinstance(message_update.get("reply_to_message"), dict) else None
-                ticket_id = _extract_support_ticket_id_from_reply(replied_to)
-                reply_text = str(message_update.get("text") or "").strip()
+                reply_to_message_id = str((replied_to or {}).get("message_id") or "").strip()
+                reply_text = str(message_update.get("text") or message_update.get("caption") or "").strip()
+                if reply_text.startswith("/"):
+                    return success_response("Ignored", {"ok": True})
+
+                ticket_id = None
+                if reply_to_message_id:
+                    by_message_id = SupportTicket.objects.filter(
+                        telegram_chat_id=chat_id,
+                        telegram_message_id=reply_to_message_id,
+                    ).first()
+                    if by_message_id:
+                        ticket_id = by_message_id.id
+
+                if not ticket_id:
+                    ticket_id = _extract_support_ticket_id_from_reply(replied_to)
+
+                if not ticket_id:
+                    ticket_id = _extract_support_ticket_id_from_text(reply_text)
                 if ticket_id and reply_text:
                     ticket = SupportTicket.objects.filter(id=ticket_id).select_related("teacher").first()
                     if ticket and (not ticket.telegram_chat_id or str(ticket.telegram_chat_id) == chat_id):
@@ -1781,6 +1830,12 @@ class PaymentTelegramWebhookView(APIView):
                         update_fields = ["teacher_reply", "teacher_reply_at", "updated_at"]
                         ticket.teacher_reply = reply_body
                         ticket.teacher_reply_at = now
+                        ticket.telegram_chat_id = chat_id
+                        update_fields.append("telegram_chat_id")
+                        incoming_message_id = str(message_update.get("message_id") or "").strip()
+                        if incoming_message_id:
+                            ticket.telegram_message_id = incoming_message_id
+                            update_fields.append("telegram_message_id")
                         if ticket.status == "open":
                             ticket.status = "in_progress"
                             update_fields.append("status")
