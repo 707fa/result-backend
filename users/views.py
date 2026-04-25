@@ -17,8 +17,7 @@ from urllib.error import HTTPError, URLError
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.db import transaction
-from django.db.models import F
-from django.db.models import Count
+from django.db.models import Avg, Count, F
 from django.core.files.base import ContentFile
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -396,6 +395,107 @@ def build_progress_block(student):
     }
 
 
+def _clamp_progress(value):
+    return max(0, min(100, int(round(value))))
+
+
+def refresh_student_progress_from_activity(student):
+    """
+    Backfill progress when legacy records have all zeros.
+    Uses existing student activity so radar chart is meaningful.
+    """
+    current_values = [
+        int(student.progress_grammar or 0),
+        int(student.progress_vocabulary or 0),
+        int(student.progress_homework or 0),
+        int(student.progress_speaking or 0),
+        int(student.progress_attendance or 0),
+    ]
+    if any(current_values):
+        return
+
+    base_qs = HomeworkSubmission.objects.filter(student=student)
+    homework_qs = base_qs.filter(task__task_type="homework")
+    speaking_qs = base_qs.filter(task__task_type="speaking")
+    reviewed_homework_qs = homework_qs.filter(status="reviewed")
+    reviewed_speaking_qs = speaking_qs.filter(status="reviewed")
+
+    homework_total = homework_qs.count()
+    homework_reviewed = reviewed_homework_qs.count()
+    speaking_total = speaking_qs.count()
+    speaking_reviewed = reviewed_speaking_qs.count()
+
+    homework_score_avg = reviewed_homework_qs.aggregate(avg=Avg("score")).get("avg")
+    speaking_score_avg = reviewed_speaking_qs.aggregate(avg=Avg("score")).get("avg")
+
+    ai_activity = AiMessage.objects.filter(conversation__user=student, role="user").count()
+    score_logs_count = ScoreLog.objects.filter(student=student).count()
+
+    next_homework = 0
+    next_speaking = 0
+    next_grammar = 0
+    next_vocabulary = 0
+    next_attendance = 0
+
+    if homework_total > 0:
+        reviewed_ratio = (homework_reviewed / max(1, homework_total)) * 100
+        score_signal = float(homework_score_avg) if homework_score_avg is not None else 0.0
+        next_homework = _clamp_progress((reviewed_ratio * 0.65) + (score_signal * 0.35))
+
+    if speaking_total > 0:
+        speaking_ratio = (speaking_reviewed / max(1, speaking_total)) * 100
+        speaking_signal = float(speaking_score_avg) if speaking_score_avg is not None else 0.0
+        next_speaking = _clamp_progress((speaking_ratio * 0.45) + (speaking_signal * 0.55))
+
+    if homework_score_avg is not None or speaking_score_avg is not None:
+        grammar_parts = []
+        if homework_score_avg is not None:
+            grammar_parts.append(float(homework_score_avg))
+        if speaking_score_avg is not None:
+            grammar_parts.append(float(speaking_score_avg) * 0.85)
+        next_grammar = _clamp_progress(sum(grammar_parts) / max(1, len(grammar_parts)))
+
+    if ai_activity > 0:
+        next_vocabulary = _clamp_progress(min(100, 20 + ai_activity * 4))
+    elif homework_score_avg is not None:
+        next_vocabulary = _clamp_progress(float(homework_score_avg) * 0.8)
+
+    attendance_base = 8 * score_logs_count
+    if homework_total > 0 or speaking_total > 0:
+        attendance_base += 18
+    next_attendance = _clamp_progress(min(100, attendance_base))
+
+    updated = False
+    if next_grammar > 0:
+        student.progress_grammar = next_grammar
+        updated = True
+    if next_vocabulary > 0:
+        student.progress_vocabulary = next_vocabulary
+        updated = True
+    if next_homework > 0:
+        student.progress_homework = next_homework
+        updated = True
+    if next_speaking > 0:
+        student.progress_speaking = next_speaking
+        updated = True
+    if next_attendance > 0:
+        student.progress_attendance = next_attendance
+        updated = True
+
+    if updated:
+        recalc_student_status(student)
+        student.save(
+            update_fields=[
+                "progress_grammar",
+                "progress_vocabulary",
+                "progress_homework",
+                "progress_speaking",
+                "progress_attendance",
+                "status_badge",
+            ]
+        )
+
+
 def to_front_student(request, student, include_phone=True):
     return {
         "id": str(student.id),
@@ -731,6 +831,7 @@ class ProgressMeView(APIView):
     permission_classes = [IsAuthenticatedAndPaid]
 
     def get(self, request):
+        refresh_student_progress_from_activity(request.user)
         data = {
             "userId": request.user.id,
             "role": request.user.role,
@@ -749,6 +850,7 @@ class TeacherStudentProgressView(APIView):
         student = get_object_or_404(User.objects.select_related("group", "group__teacher"), id=student_id, role="student")
         if not can_teacher_access_student(request.user, student):
             return error_response("Access denied", {"student": ["No access to this student"]}, status.HTTP_403_FORBIDDEN)
+        refresh_student_progress_from_activity(student)
 
         data = {
             "userId": student.id,
