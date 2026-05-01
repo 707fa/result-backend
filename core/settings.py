@@ -136,13 +136,21 @@ SECURE_HSTS_SECONDS = int(os.environ.get("SECURE_HSTS_SECONDS", "0" if (DEBUG or
 SECURE_HSTS_INCLUDE_SUBDOMAINS = get_env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", not (DEBUG or IS_TEST))
 SECURE_HSTS_PRELOAD = get_env_bool("SECURE_HSTS_PRELOAD", not (DEBUG or IS_TEST))
 
-# Guaranteed production frontend origin (Vercel).
+# Guaranteed production frontend origins.
 VERCEL_FRONTEND_ORIGIN = "https://iman-bakhruz.vercel.app"
 VERCEL_CSRF_WILDCARD = "https://*.vercel.app"
-if VERCEL_FRONTEND_ORIGIN not in CORS_ALLOWED_ORIGINS:
-    CORS_ALLOWED_ORIGINS.append(VERCEL_FRONTEND_ORIGIN)
-if VERCEL_FRONTEND_ORIGIN not in CSRF_TRUSTED_ORIGINS:
-    CSRF_TRUSTED_ORIGINS.append(VERCEL_FRONTEND_ORIGIN)
+PRODUCTION_FRONTEND_ORIGINS = [
+    VERCEL_FRONTEND_ORIGIN,
+    "https://iman-bekhruz.uz",
+    "https://www.iman-bekhruz.uz",
+    "https://iman-bakhruz.uz",
+    "https://www.iman-bakhruz.uz",
+]
+for origin in PRODUCTION_FRONTEND_ORIGINS:
+    if origin not in CORS_ALLOWED_ORIGINS:
+        CORS_ALLOWED_ORIGINS.append(origin)
+    if origin not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS.append(origin)
 if VERCEL_CSRF_WILDCARD not in CSRF_TRUSTED_ORIGINS:
     CSRF_TRUSTED_ORIGINS.append(VERCEL_CSRF_WILDCARD)
 
@@ -286,6 +294,5 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
-
 
 
