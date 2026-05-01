@@ -991,6 +991,7 @@ class HealthView(APIView):
             "database": db_ok,
             "aiProvider": ai_provider,
             "aiConfigured": ai_configured,
+            "telegramConfigured": bool(_telegram_bot_token() and _telegram_chat_ids()),
         }
         return success_response("Health check", data)
 
