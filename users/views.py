@@ -3153,10 +3153,11 @@ class SupportTicketListCreateView(APIView):
         if request.user.role != "student":
             return error_response("Only students can create support requests", {"role": ["student only"]}, status.HTTP_403_FORBIDDEN)
 
-        if not request.user.group or not request.user.group.teacher_id:
-            return error_response("Student has no teacher", {"group": ["No teacher assigned"]}, status.HTTP_400_BAD_REQUEST)
-
-        teacher = request.user.group.teacher
+        teacher = request.user.group.teacher if request.user.group and request.user.group.teacher_id else None
+        if teacher is None:
+            teacher = User.objects.filter(role="teacher", is_active=True).order_by("id").first()
+        if teacher is None:
+            return error_response("No support teacher", {"teacher": ["No active teacher found"]}, status.HTTP_400_BAD_REQUEST)
         message = (request.data.get("message") or "").strip()
         if len(message) < 3:
             return error_response("Validation error", {"message": ["Message is too short"]}, status.HTTP_400_BAD_REQUEST)
@@ -3280,4 +3281,3 @@ class SupportTicketUpdateView(APIView):
         serializer.save()
         data = SupportTicketSerializer(ticket).data
         return success_response("Support request updated", data)
-
