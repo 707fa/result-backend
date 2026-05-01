@@ -992,6 +992,7 @@ class HealthView(APIView):
             "aiProvider": ai_provider,
             "aiConfigured": ai_configured,
             "telegramConfigured": bool(_telegram_bot_token() and _telegram_chat_ids()),
+            "frontendOrigins": getattr(settings, "CORS_ALLOWED_ORIGINS", []),
         }
         return success_response("Health check", data)
 
