@@ -317,6 +317,9 @@ def _openai_tts_request(text, voice_name, audio_format):
         "input": text,
         "format": audio_format,
     }
+    instructions = (os.environ.get("VOICE_TTS_OPENAI_INSTRUCTIONS", "") or "").strip()
+    if instructions:
+        payload["instructions"] = instructions
 
     req = Request(
         request_url,
