@@ -150,34 +150,34 @@ class UserAdmin(DjangoUserAdmin):
     def has_delete_permission(self, request, obj=None):
         return request.user.is_superuser
 
-    @admin.action(description="Give selected users free access for 30 days")
+    @admin.action(description="Free access: 30 days")
     def grant_30_days(self, request, queryset):
         paid_until = timezone.now() + timedelta(days=30)
         queryset.filter(role="student").update(is_paid=True, paid_until=paid_until)
 
-    @admin.action(description="Give selected users free access for 90 days")
+    @admin.action(description="Free access: 90 days")
     def grant_90_days(self, request, queryset):
         paid_until = timezone.now() + timedelta(days=90)
         queryset.filter(role="student").update(is_paid=True, paid_until=paid_until)
 
-    @admin.action(description="Give selected users free access for 1 year")
+    @admin.action(description="Free access: 1 year")
     def grant_365_days(self, request, queryset):
         paid_until = timezone.now() + timedelta(days=365)
         queryset.filter(role="student").update(is_paid=True, paid_until=paid_until)
 
-    @admin.action(description="Remove paid access from selected students")
+    @admin.action(description="Remove paid access")
     def revoke_paid_access(self, request, queryset):
         queryset.filter(role="student").update(is_paid=False, paid_until=None)
 
-    @admin.action(description="Remove selected students from their group")
+    @admin.action(description="Remove from group")
     def remove_from_group(self, request, queryset):
         queryset.filter(role="student").update(group=None)
 
-    @admin.action(description="Deactivate selected students")
+    @admin.action(description="Deactivate students")
     def deactivate_students(self, request, queryset):
         queryset.filter(role="student").update(is_active=False, is_iman_student=False, group=None)
 
-    @admin.action(description="Activate selected students")
+    @admin.action(description="Activate students")
     def activate_students(self, request, queryset):
         queryset.filter(role="student").update(is_active=True, is_iman_student=True)
 

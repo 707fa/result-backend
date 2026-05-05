@@ -7,6 +7,10 @@ from users.views import HealthView
 import os
 
 
+admin.site.site_header = "Iman Teacher Panel"
+admin.site.site_title = "Iman Admin"
+admin.site.index_title = "Teacher workspace"
+
 ENABLE_LEGACY_ROOT_API = getattr(settings, "DEBUG", False) or (
     str(os.environ.get("ENABLE_LEGACY_ROOT_API", "") or "").strip().lower() in {"1", "true", "yes", "on"}
 )

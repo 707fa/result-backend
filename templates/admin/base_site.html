@@ -1,0 +1,21 @@
+{% extends "admin/base.html" %}
+{% load static %}
+
+{% block title %}{{ title }} | Iman Teacher Panel{% endblock %}
+
+{% block extrahead %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'admin/css/iman_admin.css' %}">
+{% endblock %}
+
+{% block branding %}
+<div class="iman-brand">
+    <div class="iman-brand-mark">I</div>
+    <div>
+        <div id="site-name"><a href="{% url 'admin:index' %}">Iman Teacher Panel</a></div>
+        <div class="iman-brand-subtitle">Groups, students, access</div>
+    </div>
+</div>
+{% endblock %}
+
+{% block nav-global %}{% endblock %}
