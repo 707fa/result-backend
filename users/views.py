@@ -2296,8 +2296,8 @@ class TeacherGroupUpdateView(APIView):
     def patch(self, request, group_id):
         if request.user.role != "teacher":
             return error_response(
-                "Only teachers can update group title",
-                {"role": ["Only teachers can update group title"]},
+                "Only teachers can update groups",
+                {"role": ["Only teachers can update groups"]},
                 status.HTTP_403_FORBIDDEN,
             )
 
@@ -2314,9 +2314,20 @@ class TeacherGroupUpdateView(APIView):
             return error_response("Validation error", serializer.errors, status.HTTP_400_BAD_REQUEST)
 
         next_title = serializer.validated_data["title"]
+        next_time = serializer.validated_data.get("time")
+        next_days_pattern = serializer.validated_data.get("days_pattern")
+        update_fields = []
         if group.title != next_title:
             group.title = next_title
-            group.save(update_fields=["title"])
+            update_fields.append("title")
+        if next_time is not None and group.time != next_time:
+            group.time = next_time
+            update_fields.append("time")
+        if next_days_pattern is not None and group.days_pattern != next_days_pattern:
+            group.days_pattern = next_days_pattern
+            update_fields.append("days_pattern")
+        if update_fields:
+            group.save(update_fields=update_fields)
 
         payload = {
             "group": {

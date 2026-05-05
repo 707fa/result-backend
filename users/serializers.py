@@ -675,12 +675,20 @@ class TeacherPaymentDecisionSerializer(serializers.Serializer):
 
 class TeacherRenameGroupSerializer(serializers.Serializer):
     title = serializers.CharField(max_length=255)
+    time = serializers.CharField(max_length=50, required=False)
+    days_pattern = serializers.ChoiceField(choices=["mwf", "tts"], required=False)
 
     def validate_title(self, value):
         title = value.strip()
         if len(title) < 2:
             raise serializers.ValidationError("Group title is too short")
         return title
+
+    def validate_time(self, value):
+        time_value = value.strip()
+        if len(time_value) < 2:
+            raise serializers.ValidationError("Group time is too short")
+        return time_value
 
 
 class PaymentTransactionSerializer(serializers.ModelSerializer):
@@ -714,4 +722,3 @@ class PaymentTransactionSerializer(serializers.ModelSerializer):
             "created_at",
             "paid_at",
         )
-
