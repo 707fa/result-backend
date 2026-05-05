@@ -89,9 +89,9 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_AI_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 DEFAULT_AI_MAX_IMAGE_BYTES = 5 * 1024 * 1024
-DEFAULT_VOICE_TTS_TIMEOUT_SECONDS = 65
+DEFAULT_VOICE_TTS_TIMEOUT_SECONDS = 20
 DEFAULT_AVATAR_MAX_IMAGE_BYTES = 3 * 1024 * 1024
-DEFAULT_VOICE_TTS_MAX_TEXT_CHARS = 700
+DEFAULT_VOICE_TTS_MAX_TEXT_CHARS = 320
 DEFAULT_AI_CHAT_MAX_WORDS = 110
 
 
@@ -193,7 +193,7 @@ def _normalize_voice_name(value, provider):
     if voice:
         return voice
     if provider == "openai":
-        return (os.environ.get("VOICE_TTS_OPENAI_VOICE", "") or "").strip() or "alloy"
+        return (os.environ.get("VOICE_TTS_OPENAI_VOICE", "") or "").strip() or "coral"
     return (os.environ.get("VOICE_TTS_GEMINI_VOICE", "") or "").strip() or "Kore"
 
 
@@ -2765,12 +2765,11 @@ class VoiceTTSView(APIView):
         provider_order_raw = (
             os.environ.get("VOICE_TTS_PROVIDER_ORDER")
             or os.environ.get("VOICE_PROVIDER_ORDER")
-            or os.environ.get("AI_PROVIDER")
-            or "gemini,openai"
+            or "openai,gemini"
         )
         provider_order = [item.strip().lower() for item in provider_order_raw.split(",") if item.strip()]
         if not provider_order:
-            provider_order = ["gemini", "openai"]
+            provider_order = ["openai", "gemini"]
 
         last_error = "No voice provider configured"
         for provider in provider_order:
