@@ -165,6 +165,15 @@ class BackendSmokeTests(TestCase):
         self.assertTrue(user_admin.has_change_permission(request, new_registered))
         self.assertTrue(user_admin.has_delete_permission(request, new_registered))
         self.assertEqual(list(group_form_field.queryset), [self.group])
+        self.assertIn("ai_progress_summary", user_admin.get_readonly_fields(request, self.student))
+        teacher_field_names = [
+            field
+            for _, options in user_admin.get_fieldsets(request, self.student)
+            for field in options["fields"]
+        ]
+        self.assertIn("ai_progress_summary", teacher_field_names)
+        self.assertNotIn("progress_grammar", teacher_field_names)
+        self.assertNotIn("progress_speaking", teacher_field_names)
 
     def test_group_title_uses_level_choices(self):
         choices = dict(Group._meta.get_field("title").choices)

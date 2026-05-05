@@ -120,23 +120,8 @@ class UserAdmin(DjangoUserAdmin):
     teacher_fieldsets = (
         ("Student", {"fields": ("phone", "full_name", "avatar", "group")}),
         ("Access", {"fields": ("is_active", "is_iman_student", "is_paid", "paid_until")}),
-        (
-            "Progress",
-            {
-                "fields": (
-                    "points",
-                    "status_badge",
-                    "progress_grammar",
-                    "progress_vocabulary",
-                    "progress_homework",
-                    "progress_speaking",
-                    "progress_attendance",
-                    "weekly_xp",
-                    "level",
-                    "streak_days",
-                )
-            },
-        ),
+        ("Teacher score", {"fields": ("points",)}),
+        ("AI progress", {"fields": ("ai_progress_summary",)}),
     )
 
     def get_queryset(self, request):
@@ -153,7 +138,18 @@ class UserAdmin(DjangoUserAdmin):
     def get_list_display(self, request):
         if request.user.is_superuser:
             return self.list_display
-        return ("id", "full_name", "phone", "student_status", "paid_status", "group", "points", "paid_until", "is_active")
+        return (
+            "id",
+            "full_name",
+            "phone",
+            "student_status",
+            "paid_status",
+            "group",
+            "points",
+            "ai_progress",
+            "paid_until",
+            "is_active",
+        )
 
     def get_list_editable(self, request):
         if request.user.is_superuser:
@@ -173,7 +169,7 @@ class UserAdmin(DjangoUserAdmin):
     def get_readonly_fields(self, request, obj=None):
         if request.user.is_superuser:
             return super().get_readonly_fields(request, obj)
-        return ("phone",)
+        return ("phone", "ai_progress_summary")
 
     def get_actions(self, request):
         actions = super().get_actions(request)
@@ -239,6 +235,33 @@ class UserAdmin(DjangoUserAdmin):
     @admin.display(description="Payment", boolean=True, ordering="is_paid")
     def paid_status(self, obj):
         return obj.is_paid
+
+    @admin.display(description="AI progress")
+    def ai_progress(self, obj):
+        values = [
+            int(obj.progress_grammar or 0),
+            int(obj.progress_vocabulary or 0),
+            int(obj.progress_homework or 0),
+            int(obj.progress_speaking or 0),
+            int(obj.progress_attendance or 0),
+        ]
+        average = round(sum(values) / len(values)) if values else 0
+        return f"{average}% / {obj.status_badge}"
+
+    @admin.display(description="AI progress")
+    def ai_progress_summary(self, obj):
+        if not obj:
+            return "AI will update progress after student activity."
+        return (
+            f"Status: {obj.status_badge}; "
+            f"grammar {obj.progress_grammar}%, "
+            f"vocabulary {obj.progress_vocabulary}%, "
+            f"homework {obj.progress_homework}%, "
+            f"speaking {obj.progress_speaking}%, "
+            f"attendance {obj.progress_attendance}%; "
+            f"level {obj.level}, weekly XP {obj.weekly_xp}, streak {obj.streak_days} days. "
+            "These fields are updated by AI/activity, not manually by the teacher."
+        )
 
     @admin.action(description="Free access: 30 days")
     def grant_30_days(self, request, queryset):
