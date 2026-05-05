@@ -277,3 +277,18 @@ class PaymentTransactionAdmin(admin.ModelAdmin):
     list_display = ("id", "user", "provider", "amount", "status", "created_at", "paid_at")
     search_fields = ("id", "external_id", "user__full_name", "user__phone")
     list_filter = ("provider", "status")
+
+    def has_module_permission(self, request):
+        return request.user.is_superuser
+
+    def has_view_permission(self, request, obj=None):
+        return request.user.is_superuser
+
+    def has_add_permission(self, request):
+        return request.user.is_superuser
+
+    def has_change_permission(self, request, obj=None):
+        return request.user.is_superuser
+
+    def has_delete_permission(self, request, obj=None):
+        return request.user.is_superuser
