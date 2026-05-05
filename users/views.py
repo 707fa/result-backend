@@ -232,40 +232,6 @@ def _gemini_tts_request(text, lang, voice_name, audio_format):
         method="POST",
     )
 
-
-def _resolve_ai_chat_provider_order():
-    configured = str(os.environ.get("AI_CHAT_PROVIDER_ORDER", "") or "").strip().lower()
-    if configured:
-        result = []
-        for item in configured.split(","):
-            value = item.strip()
-            if value in {"gemini", "openai"} and value not in result:
-                result.append(value)
-        if result:
-            return result
-    return ["gemini", "openai"]
-
-
-def _resolve_ai_chat_max_words():
-    return get_env_int("AI_CHAT_MAX_WORDS", DEFAULT_AI_CHAT_MAX_WORDS)
-
-
-def _split_stream_chunks(text, chunk_size=18):
-    content = str(text or "").strip()
-    if not content:
-        return []
-    chunks = []
-    index = 0
-    step = max(6, int(chunk_size))
-    while index < len(content):
-        chunks.append(content[index : index + step])
-        index += step
-    return chunks
-
-
-def _sse_event(event_name, payload):
-    return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
     try:
         with urlopen(req, timeout=timeout_seconds) as response:
             raw = response.read().decode("utf-8")
@@ -302,6 +268,40 @@ def _sse_event(event_name, payload):
     return audio_bytes, mime_type
 
 
+def _resolve_ai_chat_provider_order():
+    configured = str(os.environ.get("AI_CHAT_PROVIDER_ORDER", "") or "").strip().lower()
+    if configured:
+        result = []
+        for item in configured.split(","):
+            value = item.strip()
+            if value in {"gemini", "openai"} and value not in result:
+                result.append(value)
+        if result:
+            return result
+    return ["gemini", "openai"]
+
+
+def _resolve_ai_chat_max_words():
+    return get_env_int("AI_CHAT_MAX_WORDS", DEFAULT_AI_CHAT_MAX_WORDS)
+
+
+def _split_stream_chunks(text, chunk_size=18):
+    content = str(text or "").strip()
+    if not content:
+        return []
+    chunks = []
+    index = 0
+    step = max(6, int(chunk_size))
+    while index < len(content):
+        chunks.append(content[index : index + step])
+        index += step
+    return chunks
+
+
+def _sse_event(event_name, payload):
+    return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
 def _openai_tts_request(text, voice_name, audio_format):
     openai_key = (os.environ.get("OPENAI_API_KEY", "") or "").strip()
     if not openai_key:
@@ -315,7 +315,7 @@ def _openai_tts_request(text, voice_name, audio_format):
         "model": model,
         "voice": voice_name,
         "input": text,
-        "format": audio_format,
+        "response_format": audio_format,
     }
     instructions = (os.environ.get("VOICE_TTS_OPENAI_INSTRUCTIONS", "") or "").strip()
     if instructions:
