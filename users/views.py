@@ -188,13 +188,62 @@ def _normalize_voice_format(value):
     return "mp3"
 
 
+OPENAI_TTS_VOICES = {
+    "alloy",
+    "ash",
+    "ballad",
+    "coral",
+    "echo",
+    "fable",
+    "nova",
+    "onyx",
+    "sage",
+    "shimmer",
+    "verse",
+}
+
+GEMINI_TTS_VOICES = {
+    "achernar",
+    "achird",
+    "algenib",
+    "algieba",
+    "alnilam",
+    "aoede",
+    "autonoe",
+    "callirrhoe",
+    "charon",
+    "despina",
+    "enceladus",
+    "erinome",
+    "fenrir",
+    "gacrux",
+    "iapetus",
+    "kore",
+    "laomedeia",
+    "leda",
+    "orus",
+    "puck",
+    "pulcherrima",
+    "rasalgethi",
+    "sadachbia",
+    "sadaltager",
+    "schedar",
+    "sulafat",
+    "umbriel",
+    "vindemiatrix",
+    "zephyr",
+    "zubenelgenubi",
+}
+
+
 def _normalize_voice_name(value, provider):
     voice = str(value or "").strip()
-    if voice:
-        return voice
     if provider == "openai":
-        return (os.environ.get("VOICE_TTS_OPENAI_VOICE", "") or "").strip() or "coral"
-    return (os.environ.get("VOICE_TTS_GEMINI_VOICE", "") or "").strip() or "Kore"
+        default_voice = (os.environ.get("VOICE_TTS_OPENAI_VOICE", "") or "").strip() or "coral"
+        return voice if voice.lower() in OPENAI_TTS_VOICES else default_voice
+
+    default_voice = (os.environ.get("VOICE_TTS_GEMINI_VOICE", "") or "").strip() or "Kore"
+    return voice if voice.lower() in GEMINI_TTS_VOICES else default_voice
 
 
 def _gemini_tts_request(text, lang, voice_name, audio_format):
