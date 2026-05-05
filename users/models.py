@@ -25,6 +25,8 @@ class UserManager(BaseUserManager):
             raise ValueError("Phone is required")
         phone = _normalize_phone(phone)
         extra_fields.setdefault("role", "student")
+        if extra_fields.get("role") == "teacher":
+            extra_fields.setdefault("is_staff", True)
         user = self.model(phone=phone, username=phone, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
@@ -326,4 +328,3 @@ class PaymentTransaction(models.Model):
 
     def __str__(self):
         return f"{self.provider} #{self.id} ({self.status})"
-

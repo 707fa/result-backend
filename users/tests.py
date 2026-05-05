@@ -1,5 +1,6 @@
+from django.contrib import admin
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import RequestFactory, TestCase
 from rest_framework.test import APIClient
 
 from groups.models import Group
@@ -11,6 +12,7 @@ User = get_user_model()
 class BackendSmokeTests(TestCase):
     def setUp(self):
         self.client = APIClient()
+        self.factory = RequestFactory()
 
         self.teacher = User.objects.create_user(
             full_name="Teacher One",
@@ -114,3 +116,45 @@ class BackendSmokeTests(TestCase):
         names = [item["full_name"] for item in response.data["data"]]
         self.assertIn("Student One", names)
         self.assertNotIn("Inactive Student", names)
+
+    def test_teacher_admin_is_limited_to_own_groups_and_students(self):
+        other_teacher = User.objects.create_user(
+            full_name="Teacher Two",
+            phone="+998909000004",
+            password="Pass12345!",
+            role="teacher",
+        )
+        other_group = Group.objects.create(
+            title="Elementary",
+            time="17:00",
+            days_pattern="tts",
+            teacher=other_teacher,
+        )
+        other_student = User.objects.create_user(
+            full_name="Student Two",
+            phone="+998909000005",
+            password="Pass12345!",
+            role="student",
+            group=other_group,
+        )
+
+        request = self.factory.get("/admin/")
+        request.user = self.teacher
+
+        group_admin = admin.site._registry[Group]
+        user_admin = admin.site._registry[User]
+        group_ids = set(group_admin.get_queryset(request).values_list("id", flat=True))
+        user_ids = set(user_admin.get_queryset(request).values_list("id", flat=True))
+
+        self.teacher.refresh_from_db()
+        self.assertTrue(self.teacher.is_staff)
+        self.assertIn(self.group.id, group_ids)
+        self.assertNotIn(other_group.id, group_ids)
+        self.assertIn(self.student.id, user_ids)
+        self.assertNotIn(other_student.id, user_ids)
+
+    def test_group_title_uses_level_choices(self):
+        choices = dict(Group._meta.get_field("title").choices)
+        self.assertIn("Beginner", choices)
+        self.assertIn("Elementary", choices)
+        self.assertIn("Pre-Intermediate", choices)
