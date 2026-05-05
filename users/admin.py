@@ -3,12 +3,68 @@ from datetime import timedelta
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
 from django.contrib.auth.models import Group as AuthGroup
+from django.db.models import Q
 from django.utils import timezone
 
 from .models import PaymentTransaction, User
 
 
 admin.site.unregister(AuthGroup)
+
+
+class TeacherStudentScopeFilter(admin.SimpleListFilter):
+    title = "student list"
+    parameter_name = "student_scope"
+
+    def lookups(self, request, model_admin):
+        if request.user.is_superuser:
+            return ()
+        return (
+            ("mine", "My students"),
+            ("new", "Registered without group"),
+            ("paid", "Paid students"),
+            ("unpaid", "Unpaid students"),
+        )
+
+    def queryset(self, request, queryset):
+        if request.user.is_superuser:
+            return queryset
+        value = self.value()
+        if value == "mine":
+            return queryset.filter(group__teacher=request.user)
+        if value == "new":
+            return queryset.filter(group__isnull=True)
+        if value == "paid":
+            return queryset.filter(is_paid=True)
+        if value == "unpaid":
+            return queryset.filter(is_paid=False)
+        return queryset
+
+
+class TeacherGroupFilter(admin.SimpleListFilter):
+    title = "group"
+    parameter_name = "teacher_group"
+
+    def lookups(self, request, model_admin):
+        if request.user.is_superuser:
+            return ()
+        return (
+            [("none", "No group")]
+            + [
+                (str(group.id), str(group))
+                for group in request.user.teaching_groups.order_by("title", "time")
+            ]
+        )
+
+    def queryset(self, request, queryset):
+        if request.user.is_superuser:
+            return queryset
+        value = self.value()
+        if value == "none":
+            return queryset.filter(group__isnull=True)
+        if value:
+            return queryset.filter(group_id=value, group__teacher=request.user)
+        return queryset
 
 
 @admin.register(User)
@@ -88,13 +144,16 @@ class UserAdmin(DjangoUserAdmin):
         if request.user.is_superuser:
             return queryset
         if request.user.role == "teacher":
-            return queryset.filter(role="student", group__teacher=request.user)
+            return queryset.filter(
+                Q(role="student", group__teacher=request.user)
+                | Q(role="student", group__isnull=True)
+            )
         return queryset.none()
 
     def get_list_display(self, request):
         if request.user.is_superuser:
             return self.list_display
-        return ("id", "full_name", "phone", "group", "points", "is_paid", "paid_until", "is_active")
+        return ("id", "full_name", "phone", "student_status", "paid_status", "group", "points", "paid_until", "is_active")
 
     def get_list_editable(self, request):
         if request.user.is_superuser:
@@ -104,7 +163,7 @@ class UserAdmin(DjangoUserAdmin):
     def get_list_filter(self, request):
         if request.user.is_superuser:
             return self.list_filter
-        return ("is_paid", "is_active", "group")
+        return (TeacherStudentScopeFilter, "is_paid", "is_active", TeacherGroupFilter)
 
     def get_fieldsets(self, request, obj=None):
         if request.user.is_superuser:
@@ -120,7 +179,14 @@ class UserAdmin(DjangoUserAdmin):
         actions = super().get_actions(request)
         if request.user.is_superuser:
             return actions
-        allowed = {"grant_30_days", "grant_90_days", "grant_365_days", "revoke_paid_access", "remove_from_group"}
+        allowed = {
+            "grant_30_days",
+            "grant_90_days",
+            "grant_365_days",
+            "revoke_paid_access",
+            "remove_from_group",
+            "delete_selected",
+        }
         return {name: action for name, action in actions.items() if name in allowed}
 
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
@@ -149,10 +215,30 @@ class UserAdmin(DjangoUserAdmin):
             return True
         if request.user.role != "teacher":
             return False
-        return obj is None or (obj.role == "student" and obj.group and obj.group.teacher_id == request.user.id)
+        return obj is None or (
+            obj.role == "student"
+            and (obj.group_id is None or obj.group.teacher_id == request.user.id)
+        )
 
     def has_delete_permission(self, request, obj=None):
-        return request.user.is_superuser
+        if request.user.is_superuser:
+            return True
+        if request.user.role != "teacher":
+            return False
+        return obj is None or (
+            obj.role == "student"
+            and (obj.group_id is None or obj.group.teacher_id == request.user.id)
+        )
+
+    @admin.display(description="Status", ordering="group")
+    def student_status(self, obj):
+        if obj.group_id:
+            return "My student"
+        return "New registration"
+
+    @admin.display(description="Payment", boolean=True, ordering="is_paid")
+    def paid_status(self, obj):
+        return obj.is_paid
 
     @admin.action(description="Free access: 30 days")
     def grant_30_days(self, request, queryset):

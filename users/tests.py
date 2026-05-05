@@ -137,6 +137,14 @@ class BackendSmokeTests(TestCase):
             role="student",
             group=other_group,
         )
+        new_registered = User.objects.create_user(
+            full_name="New Registered",
+            phone="+998909000006",
+            password="Pass12345!",
+            role="student",
+            group=None,
+            is_paid=True,
+        )
 
         request = self.factory.get("/admin/")
         request.user = self.teacher
@@ -145,13 +153,18 @@ class BackendSmokeTests(TestCase):
         user_admin = admin.site._registry[User]
         group_ids = set(group_admin.get_queryset(request).values_list("id", flat=True))
         user_ids = set(user_admin.get_queryset(request).values_list("id", flat=True))
+        group_form_field = user_admin.formfield_for_foreignkey(User._meta.get_field("group"), request)
 
         self.teacher.refresh_from_db()
         self.assertTrue(self.teacher.is_staff)
         self.assertIn(self.group.id, group_ids)
         self.assertNotIn(other_group.id, group_ids)
         self.assertIn(self.student.id, user_ids)
+        self.assertIn(new_registered.id, user_ids)
         self.assertNotIn(other_student.id, user_ids)
+        self.assertTrue(user_admin.has_change_permission(request, new_registered))
+        self.assertTrue(user_admin.has_delete_permission(request, new_registered))
+        self.assertEqual(list(group_form_field.queryset), [self.group])
 
     def test_group_title_uses_level_choices(self):
         choices = dict(Group._meta.get_field("title").choices)
