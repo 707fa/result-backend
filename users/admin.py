@@ -2,9 +2,13 @@ from datetime import timedelta
 
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
+from django.contrib.auth.models import Group as AuthGroup
 from django.utils import timezone
 
 from .models import PaymentTransaction, User
+
+
+admin.site.unregister(AuthGroup)
 
 
 @admin.register(User)
