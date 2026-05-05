@@ -2820,7 +2820,7 @@ class VoiceTTSView(APIView):
         if not provider_order:
             provider_order = ["openai", "gemini"]
 
-        last_error = "No voice provider configured"
+        provider_errors = []
         for provider in provider_order:
             voice_name = _normalize_voice_name(requested_voice, provider)
             try:
@@ -2837,13 +2837,16 @@ class VoiceTTSView(APIView):
                 response["X-TTS-Voice"] = voice_name
                 return response
             except Exception as exc:
-                last_error = str(exc)
+                provider_errors.append(f"{provider}: {exc}")
                 logger.exception("[VOICE_TTS] provider failed: %s", provider)
                 continue
 
+        if not provider_errors:
+            provider_errors.append("No voice provider configured")
+
         return error_response(
             "Voice TTS provider unavailable",
-            {"tts": [last_error]},
+            {"tts": provider_errors},
             status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 
