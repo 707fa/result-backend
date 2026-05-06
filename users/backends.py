@@ -37,6 +37,8 @@ def _phone_candidates(raw_phone):
 
 class PhoneBackend:
     def authenticate(self, request, phone=None, password=None, **kwargs):
+        if phone is None:
+            phone = kwargs.get("username") or kwargs.get(User.USERNAME_FIELD)
         if phone is None or password is None:
             return None
 

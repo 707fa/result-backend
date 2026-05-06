@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.contrib.auth import authenticate
 from django.contrib.auth import get_user_model
 from django.test import RequestFactory, TestCase
 from rest_framework.test import APIClient
@@ -87,6 +88,11 @@ class BackendSmokeTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data.get("role"), "teacher")
+
+    def test_admin_auth_accepts_username_field(self):
+        user = authenticate(username="+998909000001", password="Pass12345!")
+        self.assertEqual(user, self.teacher)
+        self.assertTrue(user.is_staff)
 
     def test_ai_chat_rejects_invalid_image_payload(self):
         self.student.is_paid = True
