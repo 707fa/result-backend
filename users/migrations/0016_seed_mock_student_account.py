@@ -20,7 +20,7 @@ def seed_student_account(apps, schema_editor):
             phone=TEACHER_PHONE,
             defaults={
                 "username": TEACHER_PHONE,
-                "full_name": "Iman Bakhruz",
+                "full_name": "Iman | Bekhruz",
                 "password": make_password("Teacher2024!"),
                 "role": "teacher",
                 "is_active": True,
