@@ -324,6 +324,45 @@ def _gemini_tts_request(text, lang, voice_name, audio_format):
     return audio_bytes, mime_type
 
 
+def _google_translate_tts_request(text, lang, voice_name, audio_format):
+    fallback_text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not fallback_text:
+        raise RuntimeError("Fallback TTS text is empty")
+
+    max_chars = get_env_int("VOICE_TTS_FALLBACK_MAX_TEXT_CHARS", 180)
+    if len(fallback_text) > max_chars:
+        fallback_text = fallback_text[:max_chars].rsplit(" ", 1)[0].strip() or fallback_text[:max_chars]
+
+    timeout_seconds = min(_voice_timeout_seconds(), 10)
+    query = urlencode(
+        {
+            "ie": "UTF-8",
+            "q": fallback_text,
+            "tl": "en",
+            "client": "tw-ob",
+        }
+    )
+    req = Request(
+        f"https://translate.google.com/translate_tts?{query}",
+        headers={"User-Agent": "Mozilla/5.0"},
+        method="GET",
+    )
+
+    try:
+        with urlopen(req, timeout=timeout_seconds) as response:
+            audio_bytes = response.read()
+            mime_type = response.headers.get_content_type() or "audio/mpeg"
+    except HTTPError as exc:
+        details = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Fallback TTS HTTP {exc.code}: {details[:200]}")
+    except URLError as exc:
+        raise RuntimeError(f"Fallback TTS network error: {exc}")
+
+    if not audio_bytes:
+        raise RuntimeError("Fallback TTS returned empty audio")
+    return audio_bytes, mime_type
+
+
 def _resolve_ai_chat_provider_order():
     configured = str(os.environ.get("AI_CHAT_PROVIDER_ORDER", "") or "").strip().lower()
     if configured:
@@ -2826,6 +2865,8 @@ class VoiceTTSView(APIView):
         provider_order = [item.strip().lower() for item in provider_order_raw.split(",") if item.strip()]
         if not provider_order:
             provider_order = ["openai", "gemini"]
+        if "google_translate" not in provider_order and "fallback" not in provider_order:
+            provider_order.append("google_translate")
 
         provider_errors = []
         for provider in provider_order:
@@ -2835,6 +2876,9 @@ class VoiceTTSView(APIView):
                     audio_bytes, mime_type = _gemini_tts_request(text, lang, voice_name, audio_format)
                 elif provider == "openai":
                     audio_bytes, mime_type = _openai_tts_request(text, voice_name, audio_format)
+                elif provider in {"google_translate", "fallback"}:
+                    audio_bytes, mime_type = _google_translate_tts_request(text, lang, voice_name, audio_format)
+                    voice_name = "en"
                 else:
                     continue
 
