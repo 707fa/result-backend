@@ -126,6 +126,32 @@ def _extract_openai_text(payload):
     return "\n".join([part for part in parts if part]).strip()
 
 
+def _extract_chat_completion_text(payload):
+    if not isinstance(payload, dict):
+        return ""
+
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return ""
+
+    parts = []
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            parts.append(content.strip())
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    parts.append(block["text"].strip())
+
+    return "\n".join([part for part in parts if part]).strip()
+
+
 def _extract_gemini_text(payload):
     if not isinstance(payload, dict):
         return ""
@@ -274,6 +300,51 @@ def _generate_with_openai(user_text, image_data_url, system_prompt=AI_SYSTEM_PRO
         return None
 
 
+def _generate_with_groq(user_text, image_data_url, system_prompt=AI_SYSTEM_PROMPT):
+    api_key = os.environ.get("GROQ_API_KEY", "").strip()
+    model = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b").strip() or "openai/gpt-oss-120b"
+    if not api_key:
+        return None
+
+    prompt = user_text or "Help me with English homework."
+    if image_data_url:
+        prompt = (
+            f"{prompt}\n\n"
+            "The student attached an image, but this temporary Groq test provider receives text only. "
+            "Ask the student to type what is in the image if visual review is needed."
+        )
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.7,
+        "max_completion_tokens": _get_int_env("GROQ_MAX_COMPLETION_TOKENS", 1024, min_value=64, max_value=8192),
+        "top_p": 1,
+        "reasoning_effort": os.environ.get("GROQ_REASONING_EFFORT", "medium").strip() or "medium",
+        "stream": False,
+    }
+
+    try:
+        raw = _post_json(
+            "https://api.groq.com/openai/v1/chat/completions",
+            {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            payload,
+            timeout=_get_int_env("GROQ_TIMEOUT_SECONDS", 45, min_value=5, max_value=120),
+        )
+        data = json.loads(raw)
+        answer = _extract_chat_completion_text(data)
+        return answer or None
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        logger.warning("[IMAN_AI][GROQ] request failed: %s", exc)
+        return None
+
+
 def _generate_with_gemini(user_text, image_data_url, system_prompt=AI_SYSTEM_PROMPT):
     api_key = os.environ.get("GEMINI_API_KEY", "").strip() or os.environ.get("GOOGLE_API_KEY", "").strip()
     configured_model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
@@ -411,18 +482,21 @@ def generate_iman_ai_reply(
             provider_order = [item.strip() for item in configured.split(",") if item.strip()]
         else:
             default_provider = (os.environ.get("AI_PROVIDER", "gemini") or "gemini").strip().lower()
-            provider_order = [default_provider, "openai" if default_provider == "gemini" else "gemini"]
+            fallback_providers = [item for item in ["gemini", "openai"] if item != default_provider]
+            provider_order = [default_provider, *fallback_providers]
 
     normalized_order = []
     for provider in provider_order:
         key = str(provider or "").strip().lower()
-        if key in {"gemini", "openai"} and key not in normalized_order:
+        if key in {"groq", "gemini", "openai"} and key not in normalized_order:
             normalized_order.append(key)
     if not normalized_order:
         normalized_order = ["gemini", "openai"]
 
     for provider in normalized_order:
-        if provider == "gemini":
+        if provider == "groq":
+            reply = _generate_with_groq(user_text, image_data_url, system_prompt=system_prompt)
+        elif provider == "gemini":
             reply = _generate_with_gemini(user_text, image_data_url, system_prompt=system_prompt)
         else:
             reply = _generate_with_openai(user_text, image_data_url, system_prompt=system_prompt)
@@ -545,6 +619,7 @@ def generate_speaking_analysis(question, transcript, level="", language="", grou
         language=reply_language,
         group_title=group_title,
         group_time=group_time,
+        provider_order=_get_csv_env("AI_SPEAKING_PROVIDER_ORDER", ["groq", "gemini", "openai"]),
         response_mode="json",
     )
 
