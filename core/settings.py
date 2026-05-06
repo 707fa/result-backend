@@ -146,6 +146,16 @@ PRODUCTION_FRONTEND_ORIGINS = [
     "https://iman-bakhruz.uz",
     "https://www.iman-bakhruz.uz",
 ]
+PRODUCTION_HOSTS = [
+    "result-backend-ynme.onrender.com",
+    "iman-bekhruz.uz",
+    "www.iman-bekhruz.uz",
+    "iman-bakhruz.uz",
+    "www.iman-bakhruz.uz",
+]
+for host in PRODUCTION_HOSTS:
+    if host not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(host)
 for origin in PRODUCTION_FRONTEND_ORIGINS:
     if origin not in CORS_ALLOWED_ORIGINS:
         CORS_ALLOWED_ORIGINS.append(origin)
