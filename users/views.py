@@ -269,10 +269,17 @@ def _gemini_tts_request(text, lang, voice_name, audio_format):
         },
     }
 
-    if lang:
-        payload["systemInstruction"] = {
-            "parts": [{"text": f"Speak in language locale: {lang}"}]
-        }
+    payload["systemInstruction"] = {
+        "parts": [
+            {
+                "text": (
+                    "You are an English-only voice tutor. Speak only in natural English "
+                    "(US accent, en-US). If the input contains Uzbek or Russian, translate "
+                    "the meaning to simple English before speaking. Never speak Russian or Uzbek."
+                )
+            }
+        ]
+    }
 
     req = Request(
         request_url,
