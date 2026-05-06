@@ -27,6 +27,17 @@ FOUNDATION_LEVELS = {"beginner", "elementary"}
 logger = logging.getLogger(__name__)
 
 
+def _normalize_provider_key(value):
+    key = str(value or "").strip().lower()
+    key = key.translate(str.maketrans({"с": "c", "о": "o", "е": "e", "а": "a"}))
+    aliases = {
+        "geminic": "gemini",
+        "google": "gemini",
+        "gpt": "openai",
+    }
+    return aliases.get(key, key)
+
+
 def _get_int_env(name, default, min_value=0, max_value=10):
     raw = os.environ.get(name)
     if raw is None:
@@ -479,15 +490,15 @@ def generate_iman_ai_reply(
     if provider_order is None:
         configured = str(os.environ.get("AI_PROVIDER_ORDER", "") or "").strip().lower()
         if configured:
-            provider_order = [item.strip() for item in configured.split(",") if item.strip()]
+            provider_order = [_normalize_provider_key(item) for item in configured.split(",") if item.strip()]
         else:
-            default_provider = (os.environ.get("AI_PROVIDER", "gemini") or "gemini").strip().lower()
+            default_provider = _normalize_provider_key(os.environ.get("AI_PROVIDER", "gemini"))
             fallback_providers = [item for item in ["gemini", "openai"] if item != default_provider]
             provider_order = [default_provider, *fallback_providers]
 
     normalized_order = []
     for provider in provider_order:
-        key = str(provider or "").strip().lower()
+        key = _normalize_provider_key(provider)
         if key in {"groq", "gemini", "openai"} and key not in normalized_order:
             normalized_order.append(key)
     if not normalized_order:

@@ -95,6 +95,17 @@ DEFAULT_VOICE_TTS_MAX_TEXT_CHARS = 320
 DEFAULT_AI_CHAT_MAX_WORDS = 110
 
 
+def _normalize_provider_key(value):
+    key = str(value or "").strip().lower()
+    key = key.translate(str.maketrans({"с": "c", "о": "o", "е": "e", "а": "a"}))
+    aliases = {
+        "geminic": "gemini",
+        "google": "gemini",
+        "gpt": "openai",
+    }
+    return aliases.get(key, key)
+
+
 def success_response(message, data=None, status_code=status.HTTP_200_OK):
     return Response(
         {
@@ -368,7 +379,7 @@ def _resolve_ai_chat_provider_order():
     if configured:
         result = []
         for item in configured.split(","):
-            value = item.strip()
+            value = _normalize_provider_key(item)
             if value in {"gemini", "openai"} and value not in result:
                 result.append(value)
         if result:
@@ -1077,7 +1088,7 @@ class HealthView(APIView):
         except Exception:
             db_ok = False
 
-        ai_provider = (os.environ.get("AI_PROVIDER", "gemini") or "gemini").strip().lower()
+        ai_provider = _normalize_provider_key(os.environ.get("AI_PROVIDER", "gemini"))
         ai_configured = bool(
             os.environ.get("GEMINI_API_KEY")
             or os.environ.get("GOOGLE_API_KEY")
