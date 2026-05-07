@@ -1591,10 +1591,13 @@ def _build_support_ticket_telegram_text(ticket):
     created_at = getattr(ticket, "created_at", None)
     created_at_text = created_at.strftime("%Y-%m-%d %H:%M") if created_at else "-"
     teacher_name = getattr(getattr(ticket, "teacher", None), "full_name", "") or "-"
+    requester_role = getattr(student, "role", "") or "student"
+    requester_label = "Teacher" if requester_role == "teacher" else "Student"
     return (
         f"🆘 New support request #{ticket.id}\n"
         f"Ticket ID: {ticket.id}\n"
-        f"Student: {getattr(student, 'full_name', '-')}\n"
+        f"From: {requester_label}\n"
+        f"Name: {getattr(student, 'full_name', '-')}\n"
         f"Phone: {getattr(student, 'phone', '-')}\n"
         f"Level: {getattr(student, 'level', '-')}\n"
         f"Group: {getattr(group, 'title', '-') if group else '-'}\n"
@@ -1637,10 +1640,13 @@ def notify_telegram_support_message(ticket, message_text):
         return False
 
     student = getattr(ticket, "student", None)
+    requester_role = getattr(student, "role", "") or "student"
+    requester_label = "Teacher" if requester_role == "teacher" else "Student"
     text = (
         f"💬 Support update for ticket #{ticket.id}\n"
         f"Ticket ID: {ticket.id}\n"
-        f"Student: {getattr(student, 'full_name', '-')}\n"
+        f"From: {requester_label}\n"
+        f"Name: {getattr(student, 'full_name', '-')}\n"
         f"Phone: {getattr(student, 'phone', '-')}\n"
         f"Message:\n{str(message_text or '').strip()}"
     )
@@ -3279,12 +3285,14 @@ class SupportTicketListCreateView(APIView):
         return success_response("Support tickets fetched", data)
 
     def post(self, request):
-        if request.user.role != "student":
-            return error_response("Only students can create support requests", {"role": ["student only"]}, status.HTTP_403_FORBIDDEN)
-
-        teacher = request.user.group.teacher if request.user.group and request.user.group.teacher_id else None
-        if teacher is None:
-            teacher = User.objects.filter(role="teacher", is_active=True).order_by("id").first()
+        if request.user.role == "teacher":
+            teacher = request.user
+        elif request.user.role == "student":
+            teacher = request.user.group.teacher if request.user.group and request.user.group.teacher_id else None
+            if teacher is None:
+                teacher = User.objects.filter(role="teacher", is_active=True).order_by("id").first()
+        else:
+            return error_response("Only students and teachers can create support requests", {"role": ["student or teacher only"]}, status.HTTP_403_FORBIDDEN)
         if teacher is None:
             return error_response("No support teacher", {"teacher": ["No active teacher found"]}, status.HTTP_400_BAD_REQUEST)
         message = (request.data.get("message") or "").strip()
@@ -3298,10 +3306,11 @@ class SupportTicketListCreateView(APIView):
         )
         SupportTicketMessage.objects.create(
             ticket=ticket,
-            sender_type="student",
+            sender_type="teacher" if request.user.role == "teacher" else "student",
             text=message,
             source="web",
-            read_by_student_at=timezone.now(),
+            read_by_student_at=timezone.now() if request.user.role == "student" else None,
+            read_by_support_at=timezone.now() if request.user.role == "teacher" else None,
         )
         telegram_notified = notify_telegram_support_ticket(ticket)
         data = SupportTicketSerializer(ticket).data
@@ -3385,7 +3394,7 @@ class SupportTicketMessagesView(APIView):
         )
 
         telegram_notified = False
-        if request.user.role == "student":
+        if request.user.role == "student" or (request.user.role == "teacher" and ticket.student_id == request.user.id and ticket.teacher_id == request.user.id):
             telegram_notified = notify_telegram_support_message(ticket, text)
 
         payload = {
