@@ -2,6 +2,8 @@
 import re
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from groups.models import Group
 from ratings.models import ScoreLog
 from .models import (
@@ -136,7 +138,7 @@ def _phone_variants(value):
 class RegisterSerializer(serializers.Serializer):
     full_name = serializers.CharField(max_length=255)
     phone = serializers.CharField(max_length=20)
-    password = serializers.CharField(write_only=True, min_length=6)
+    password = serializers.CharField(write_only=True, min_length=8, max_length=128)
     group_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     group = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     time = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -150,6 +152,19 @@ class RegisterSerializer(serializers.Serializer):
             raise serializers.ValidationError("User with this phone already exists")
 
         return phone
+
+    def validate_full_name(self, value):
+        full_name = re.sub(r"\s+", " ", str(value or "").strip())
+        if len(full_name) < 2:
+            raise serializers.ValidationError("Full name is too short")
+        return full_name
+
+    def validate_password(self, value):
+        try:
+            validate_password(value)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(list(exc.messages))
+        return value
 
     def validate(self, attrs):
         group = None
@@ -191,8 +206,11 @@ class RegisterSerializer(serializers.Serializer):
 
 
 class LoginSerializer(serializers.Serializer):
-    phone = serializers.CharField()
-    password = serializers.CharField()
+    phone = serializers.CharField(max_length=20)
+    password = serializers.CharField(max_length=128, trim_whitespace=False)
+
+    def validate_phone(self, value):
+        return _normalize_phone(value)
 
 
 class MeSerializer(serializers.ModelSerializer):
@@ -467,13 +485,13 @@ class AiConversationSerializer(serializers.ModelSerializer):
 
 
 class AiSendMessageSerializer(serializers.Serializer):
-    text = serializers.CharField(required=False, allow_blank=True)
-    imageBase64 = serializers.CharField(required=False, allow_blank=True)
-    level = serializers.CharField(required=False, allow_blank=True, allow_null=True)
-    language = serializers.CharField(required=False, allow_blank=True, allow_null=True)
-    groupTitle = serializers.CharField(required=False, allow_blank=True, allow_null=True)
-    groupTime = serializers.CharField(required=False, allow_blank=True, allow_null=True)
-    systemContext = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    text = serializers.CharField(required=False, allow_blank=True, max_length=5000)
+    imageBase64 = serializers.CharField(required=False, allow_blank=True, max_length=8000000)
+    level = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=40)
+    language = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=16)
+    groupTitle = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=120)
+    groupTime = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=50)
+    systemContext = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=1200)
 
     def validate(self, attrs):
         text = (attrs.get("text") or "").strip()
@@ -662,6 +680,9 @@ class ManualPaymentReceiptUploadSerializer(serializers.Serializer):
         max_bytes = 8 * 1024 * 1024
         if value.size > max_bytes:
             raise serializers.ValidationError("Receipt image is too large (max 8MB)")
+        content_type = str(getattr(value, "content_type", "") or "").lower()
+        if content_type and content_type not in {"image/jpeg", "image/png", "image/webp"}:
+            raise serializers.ValidationError("Only JPG, PNG, and WEBP receipt images are supported")
         return value
 
 

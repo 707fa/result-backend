@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 
 from django.contrib.auth.hashers import make_password
@@ -6,11 +7,18 @@ from django.utils import timezone
 
 
 STUDENT_PHONE = "+998999999999"
-STUDENT_PASSWORD = "123456789"
 TEACHER_PHONE = "+998900000001"
 
 
 def seed_student_account(apps, schema_editor):
+    if str(os.environ.get("ENABLE_DEMO_SEED", "") or "").strip().lower() not in {"1", "true", "yes", "on"}:
+        return
+
+    student_password = str(os.environ.get("DEMO_STUDENT_PASSWORD", "") or "").strip()
+    teacher_password = str(os.environ.get("DEMO_TEACHER_PASSWORD", "") or "").strip()
+    if not student_password or not teacher_password:
+        return
+
     User = apps.get_model("users", "User")
     Group = apps.get_model("groups", "Group")
 
@@ -21,7 +29,7 @@ def seed_student_account(apps, schema_editor):
             defaults={
                 "username": TEACHER_PHONE,
                 "full_name": "Iman | Bekhruz",
-                "password": make_password("Teacher2024!"),
+                "password": make_password(teacher_password),
                 "role": "teacher",
                 "is_active": True,
                 "is_staff": True,
@@ -46,7 +54,7 @@ def seed_student_account(apps, schema_editor):
         defaults={
             "username": STUDENT_PHONE,
             "full_name": "Ахроров Фаррух",
-            "password": make_password(STUDENT_PASSWORD),
+            "password": make_password(student_password),
             "role": "student",
             "group": group,
             "is_active": True,

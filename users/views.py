@@ -17,7 +17,7 @@ from urllib.error import HTTPError, URLError
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.db import transaction
-from django.db.models import Avg, Count, F
+from django.db.models import Avg, Count, F, Q
 from django.core.files.base import ContentFile
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -612,8 +612,8 @@ def refresh_student_progress_from_activity(student):
         )
 
 
-def to_front_student(request, student, include_phone=True):
-    return {
+def to_front_student(request, student, include_phone=True, include_private=False):
+    data = {
         "id": str(student.id),
         "fullName": student.full_name,
         "phone": student.phone if include_phone else "",
@@ -621,11 +621,13 @@ def to_front_student(request, student, include_phone=True):
         "groupId": str(student.group_id) if student.group_id else "",
         "avatarUrl": avatar_url(request, student),
         "points": float(student.points),
-        "isPaid": bool(student.is_paid),
-        "paidUntil": student.paid_until.isoformat() if student.paid_until else None,
         "progress": build_progress_block(student),
         "statusBadge": student.status_badge,
     }
+    if include_private:
+        data["isPaid"] = bool(student.is_paid)
+        data["paidUntil"] = student.paid_until.isoformat() if student.paid_until else None
+    return data
 
 
 def to_front_teacher(request, teacher, group_ids, include_phone=False):
@@ -1095,7 +1097,6 @@ class HealthView(APIView):
         except Exception:
             db_ok = False
 
-        ai_provider = _normalize_provider_key(os.environ.get("AI_PROVIDER", "gemini"))
         ai_configured = bool(
             os.environ.get("GEMINI_API_KEY")
             or os.environ.get("GOOGLE_API_KEY")
@@ -1105,10 +1106,8 @@ class HealthView(APIView):
         data = {
             "status": "ok" if db_ok else "degraded",
             "database": db_ok,
-            "aiProvider": ai_provider,
             "aiConfigured": ai_configured,
             "telegramConfigured": bool(_telegram_bot_token() and _telegram_chat_ids()),
-            "frontendOrigins": getattr(settings, "CORS_ALLOWED_ORIGINS", []),
         }
         return success_response("Health check", data)
 
@@ -1714,6 +1713,8 @@ def _can_accept_telegram_support_reply(chat_id):
 
 class PaymentCreateView(APIView):
     permission_classes = [IsAuthenticatedAndPaid]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "payment"
 
     def post(self, request):
         if request.user.role != "student":
@@ -1803,6 +1804,8 @@ class PaymentStatusView(APIView):
 
 class PaymentManualReceiptUploadView(APIView):
     permission_classes = [IsAuthenticatedAndPaid]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "payment"
 
     def post(self, request):
         if request.user.role != "student":
@@ -1918,6 +1921,8 @@ class TeacherPaymentRequestsView(APIView):
 
 class TeacherPaymentRequestApproveView(APIView):
     permission_classes = [IsAuthenticatedAndPaid]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "payment"
 
     def post(self, request, transaction_id):
         if request.user.role != "teacher":
@@ -1966,6 +1971,8 @@ class TeacherPaymentRequestApproveView(APIView):
 
 class TeacherPaymentRequestRejectView(APIView):
     permission_classes = [IsAuthenticatedAndPaid]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "payment"
 
     def post(self, request, transaction_id):
         if request.user.role != "teacher":
@@ -2003,6 +2010,8 @@ class TeacherPaymentRequestRejectView(APIView):
 
 class PaymentTelegramWebhookView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "webhook"
 
     def post(self, request):
         if not is_valid_telegram_webhook_secret(request):
@@ -2139,6 +2148,8 @@ class PaymentTelegramWebhookView(APIView):
 
 class PaymentWebhookPaymeView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "webhook"
 
     def post(self, request):
         if not is_valid_webhook_secret(request):
@@ -2197,6 +2208,8 @@ class PaymentWebhookPaymeView(APIView):
 
 class PaymentWebhookClickView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "webhook"
 
     def post(self, request):
         if not is_valid_webhook_secret(request):
@@ -2260,15 +2273,30 @@ class PlatformStateView(APIView):
         subscription = get_subscription_payload(request.user)
         paid_access = bool(subscription.get("isPaid")) or request.user.role != "student"
 
-        groups = list(
-            Group.objects.select_related("teacher")
-            .order_by("title", "time")
-        )
+        groups_qs = Group.objects.select_related("teacher").order_by("title", "time")
+        visible_students_qs = User.objects.filter(role="student", is_iman_student=True, is_active=True)
+        ranking_students_qs = visible_students_qs
 
+        if request.user.role == "teacher" and not request.user.is_superuser:
+            groups_qs = groups_qs.filter(teacher=request.user)
+            visible_students_qs = visible_students_qs.filter(
+                Q(group__teacher=request.user) | Q(group__isnull=True)
+            )
+        elif request.user.role == "student":
+            visible_students_qs = visible_students_qs.filter(
+                Q(id=request.user.id) | Q(group_id=request.user.group_id)
+            )
+
+        groups = list(groups_qs)
         students = list(
-            User.objects.filter(role="student", is_iman_student=True, is_active=True)
-            .select_related("group")
+            visible_students_qs
+            .select_related("group", "group__teacher")
             .order_by("-points", "full_name")
+        )
+        ranking_students = list(
+            ranking_students_qs
+            .select_related("group")
+            .order_by("-points", "full_name")[:100]
         )
 
         teachers = list(
@@ -2286,7 +2314,7 @@ class PlatformStateView(APIView):
                 "avatarUrl": avatar_url(request, student),
                 "statusBadge": student.status_badge,
             }
-            for student in students
+            for student in ranking_students
         ]
 
         if request.user.role == "teacher":
@@ -2313,8 +2341,24 @@ class PlatformStateView(APIView):
 
         payload_students = []
         for student in students:
-            include_phone = request.user.role == "teacher" or request.user.id == student.id
-            payload_students.append(to_front_student(request, student, include_phone=include_phone))
+            is_self = request.user.id == student.id
+            teacher_can_see = (
+                request.user.role == "teacher"
+                and (
+                    request.user.is_superuser
+                    or (student.group_id and student.group.teacher_id == request.user.id)
+                    or student.group_id is None
+                )
+            )
+            include_private = bool(is_self or teacher_can_see)
+            payload_students.append(
+                to_front_student(
+                    request,
+                    student,
+                    include_phone=include_private,
+                    include_private=include_private,
+                )
+            )
 
         payload = {
             "students": payload_students,
@@ -2323,7 +2367,7 @@ class PlatformStateView(APIView):
                     request,
                     teacher,
                     teacher.teaching_groups.values_list("id", flat=True),
-                    include_phone=request.user.role == "teacher",
+                    include_phone=request.user.is_superuser or request.user.id == teacher.id,
                 )
                 for teacher in teachers
             ],
@@ -2926,6 +2970,8 @@ class VoiceTTSView(APIView):
 
 class AiChatMessagesView(APIView):
     permission_classes = [IsAuthenticatedAndPaid]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "ai_chat"
 
     def get(self, request):
         conversation, _ = AiConversation.objects.get_or_create(user=request.user)
@@ -2945,6 +2991,12 @@ class AiChatMessagesView(APIView):
         group_title = serializer.validated_data.get("groupTitle", "")
         group_time = serializer.validated_data.get("groupTime", "")
         system_context = serializer.validated_data.get("systemContext", "")
+
+        if request.user.role == "student":
+            system_context = ""
+            if request.user.group_id:
+                group_title = request.user.group.title
+                group_time = request.user.group.time
 
         user_message = AiMessage.objects.create(
             conversation=conversation,
@@ -3031,6 +3083,8 @@ class AiChatMessagesView(APIView):
 
 class AiChatMessagesStreamView(APIView):
     permission_classes = [IsAuthenticatedAndPaid]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "ai_chat"
 
     def post(self, request):
         serializer = AiSendMessageSerializer(data=request.data)
@@ -3045,6 +3099,12 @@ class AiChatMessagesStreamView(APIView):
         group_title = serializer.validated_data.get("groupTitle", "")
         group_time = serializer.validated_data.get("groupTime", "")
         system_context = serializer.validated_data.get("systemContext", "")
+
+        if request.user.role == "student":
+            system_context = ""
+            if request.user.group_id:
+                group_title = request.user.group.title
+                group_time = request.user.group.time
 
         user_message = AiMessage.objects.create(
             conversation=conversation,
@@ -3136,6 +3196,8 @@ class AiChatMessagesStreamView(APIView):
 
 class AiSpeakingCheckView(APIView):
     permission_classes = [IsAuthenticatedAndPaid]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "ai_speaking"
 
     def post(self, request):
         serializer = AiSpeakingCheckSerializer(data=request.data)
@@ -3279,6 +3341,8 @@ class GrammarTopicsView(APIView):
 
 class SupportTicketListCreateView(APIView):
     permission_classes = [IsAuthenticatedAndPaid]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "support"
 
     def get(self, request):
         if request.user.role == "teacher":
@@ -3324,6 +3388,8 @@ class SupportTicketListCreateView(APIView):
 
 class SupportTicketMessagesView(APIView):
     permission_classes = [IsAuthenticatedAndPaid]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "support"
 
     def get_ticket_for_user(self, request, ticket_id):
         if request.user.role == "teacher":

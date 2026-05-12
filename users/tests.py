@@ -109,6 +109,14 @@ class BackendSmokeTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data.get("role"), "teacher")
 
+    def test_inactive_user_cannot_login(self):
+        response = self.client.post(
+            "/api/auth/login",
+            {"phone": "909000003", "password": "Pass12345!"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 401)
+
     def test_admin_auth_accepts_username_field(self):
         user = authenticate(username="+998909000001", password="Pass12345!")
         self.assertEqual(user, self.teacher)
@@ -152,6 +160,39 @@ class BackendSmokeTests(TestCase):
 
         friendly_response = self.client.get("/api/chat/friendly/conversations")
         self.assertEqual(friendly_response.status_code, 200)
+
+    def test_platform_state_does_not_leak_other_students_payment_data(self):
+        other_teacher = User.objects.create_user(
+            full_name="Teacher Two",
+            phone="+998909000007",
+            password="Pass12345!",
+            role="teacher",
+        )
+        other_group = Group.objects.create(
+            title="Elementary",
+            time="17:00",
+            days_pattern="tts",
+            teacher=other_teacher,
+        )
+        other_student = User.objects.create_user(
+            full_name="Paid Other Student",
+            phone="+998909000008",
+            password="Pass12345!",
+            role="student",
+            group=other_group,
+            is_paid=True,
+        )
+
+        self.auth("+998909000002", "Pass12345!")
+        response = self.client.get("/api/platform/state")
+        self.assertEqual(response.status_code, 200)
+        students = response.data["data"]["students"]
+        self.assertNotIn(str(other_student.id), {item["id"] for item in students})
+
+        rankings = response.data["data"]["rankings"]
+        public_other = next(item for item in rankings if item["studentId"] == str(other_student.id))
+        self.assertNotIn("isPaid", public_other)
+        self.assertNotIn("phone", public_other)
 
     def test_global_rating_excludes_inactive_students(self):
         self.auth("+998909000001", "Pass12345!")

@@ -36,6 +36,9 @@ def _phone_candidates(raw_phone):
 
 
 class PhoneBackend:
+    def user_can_authenticate(self, user):
+        return getattr(user, "is_active", False)
+
     def authenticate(self, request, phone=None, password=None, **kwargs):
         if phone is None:
             phone = kwargs.get("username") or kwargs.get(User.USERNAME_FIELD)
@@ -49,11 +52,11 @@ class PhoneBackend:
         users = list(User.objects.filter(phone__in=candidates).order_by("id"))
 
         exact = next((user for user in users if str(user.phone).strip() == str(phone).strip()), None)
-        if exact and exact.check_password(password):
+        if exact and self.user_can_authenticate(exact) and exact.check_password(password):
             return exact
 
         for user in users:
-            if user.check_password(password):
+            if self.user_can_authenticate(user) and user.check_password(password):
                 return user
 
         return None

@@ -69,6 +69,11 @@ elif DEBUG or IS_TEST:
 else:
     raise RuntimeError("SECRET_KEY is required in production")
 
+if not (DEBUG or IS_TEST):
+    weak_secret_values = {"123456789", "changeme", "change-me", "secret", "django-insecure"}
+    if len(SECRET_KEY) < 50 or SECRET_KEY.lower() in weak_secret_values or SECRET_KEY.startswith("dev-insecure-"):
+        raise RuntimeError("SECRET_KEY is too weak for production. Use a long random value (50+ chars).")
+
 
 def _clean_origin(value):
     cleaned = str(value or "").strip().strip("'").strip('"').strip()
@@ -119,7 +124,13 @@ CSRF_TRUSTED_ORIGINS = get_env_list("CSRF_TRUSTED_ORIGINS")
 CORS_ALLOWED_ORIGINS = get_env_list("CORS_ALLOWED_ORIGINS")
 CORS_ALLOW_ALL_ORIGINS = get_env_bool("CORS_ALLOW_ALL_ORIGINS", False)
 CORS_ALLOW_CREDENTIALS = get_env_bool("CORS_ALLOW_CREDENTIALS", True)
-CORS_ALLOWED_ORIGIN_REGEXES = [r"^https://.*\.vercel\.app$"]
+CORS_ALLOWED_ORIGIN_REGEXES = []
+ALLOW_VERCEL_PREVIEW_ORIGINS = get_env_bool("ALLOW_VERCEL_PREVIEW_ORIGINS", DEBUG)
+if ALLOW_VERCEL_PREVIEW_ORIGINS:
+    CORS_ALLOWED_ORIGIN_REGEXES.append(r"^https://[-a-zA-Z0-9]+\.vercel\.app$")
+
+if CORS_ALLOW_ALL_ORIGINS and not (DEBUG or IS_TEST):
+    raise RuntimeError("CORS_ALLOW_ALL_ORIGINS cannot be enabled in production.")
 
 # Security hardening (safe defaults for production)
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
@@ -127,10 +138,12 @@ SECURE_SSL_REDIRECT = get_env_bool("SECURE_SSL_REDIRECT", not (DEBUG or IS_TEST)
 SESSION_COOKIE_SECURE = get_env_bool("SESSION_COOKIE_SECURE", not (DEBUG or IS_TEST))
 CSRF_COOKIE_SECURE = get_env_bool("CSRF_COOKIE_SECURE", not (DEBUG or IS_TEST))
 SESSION_COOKIE_HTTPONLY = True
+CSRF_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = os.environ.get("SESSION_COOKIE_SAMESITE", "Lax")
 CSRF_COOKIE_SAMESITE = os.environ.get("CSRF_COOKIE_SAMESITE", "Lax")
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = "DENY"
+SECURE_CROSS_ORIGIN_OPENER_POLICY = "same-origin"
 SECURE_REFERRER_POLICY = os.environ.get("SECURE_REFERRER_POLICY", "same-origin")
 SECURE_HSTS_SECONDS = int(os.environ.get("SECURE_HSTS_SECONDS", "0" if (DEBUG or IS_TEST) else "31536000"))
 SECURE_HSTS_INCLUDE_SUBDOMAINS = get_env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", not (DEBUG or IS_TEST))
@@ -161,7 +174,7 @@ for origin in PRODUCTION_FRONTEND_ORIGINS:
         CORS_ALLOWED_ORIGINS.append(origin)
     if origin not in CSRF_TRUSTED_ORIGINS:
         CSRF_TRUSTED_ORIGINS.append(origin)
-if VERCEL_CSRF_WILDCARD not in CSRF_TRUSTED_ORIGINS:
+if ALLOW_VERCEL_PREVIEW_ORIGINS and VERCEL_CSRF_WILDCARD not in CSRF_TRUSTED_ORIGINS:
     CSRF_TRUSTED_ORIGINS.append(VERCEL_CSRF_WILDCARD)
 
 INSTALLED_APPS = [
@@ -183,13 +196,13 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    "users.middleware.SecurityHeadersMiddleware",
     "django.middleware.gzip.GZipMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
-    "users.middleware.LaunchAccountMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -270,6 +283,11 @@ REST_FRAMEWORK = {
         "auth_login": os.environ.get("DRF_THROTTLE_AUTH_LOGIN", "8/min"),
         "auth_register": os.environ.get("DRF_THROTTLE_AUTH_REGISTER", "4/min"),
         "voice_tts": os.environ.get("DRF_THROTTLE_VOICE_TTS", "20/min"),
+        "ai_chat": os.environ.get("DRF_THROTTLE_AI_CHAT", "30/min"),
+        "ai_speaking": os.environ.get("DRF_THROTTLE_AI_SPEAKING", "20/min"),
+        "support": os.environ.get("DRF_THROTTLE_SUPPORT", "20/min"),
+        "payment": os.environ.get("DRF_THROTTLE_PAYMENT", "20/min"),
+        "webhook": os.environ.get("DRF_THROTTLE_WEBHOOK", "120/min"),
     },
 }
 
