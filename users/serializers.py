@@ -260,7 +260,7 @@ class TeacherGroupSerializer(serializers.ModelSerializer):
         )
 
     def get_students_count(self, obj):
-        return obj.students.filter(role="student").count()
+        return obj.students.filter(role="student", is_active=True, is_iman_student=True).count()
 
 
 class TeacherStudentSerializer(serializers.ModelSerializer):

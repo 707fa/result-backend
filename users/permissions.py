@@ -24,6 +24,16 @@ class IsAuthenticatedAndPaid(BasePermission):
         path = request.path.rstrip("/").lower()
 
         free_paths = (
+            "/platform/state",
+            "/api/platform/state",
+            "/users/me",
+            "/api/users/me",
+            "/users/me/avatar",
+            "/api/users/me/avatar",
+            "/users/profile",
+            "/api/users/profile",
+            "/progress/me",
+            "/api/progress/me",
             "/ratings/global",
             "/api/ratings/global",
             "/ratings/group",
@@ -38,6 +48,12 @@ class IsAuthenticatedAndPaid(BasePermission):
             "/api/payments/manual-receipt",
             "/support/tickets",
             "/api/support/tickets",
+            "/chat/friendly/conversations",
+            "/api/chat/friendly/conversations",
+            "/grammar/topics",
+            "/api/grammar/topics",
+            "/student/homework/tasks",
+            "/api/student/homework/tasks",
         )
 
         if any(path == allowed or path.startswith(f"{allowed}/") for allowed in free_paths):

@@ -80,6 +80,26 @@ class BackendSmokeTests(TestCase):
         self.assertEqual(created.group_id, self.group.id)
         self.assertEqual(created.role, "student")
 
+    def test_register_accepts_frontend_group_title_payload(self):
+        unique_group = Group.objects.create(
+            title="Advanced",
+            time="19:45",
+            days_pattern="tts",
+            teacher=self.teacher,
+        )
+        payload = {
+            "fullName": "Title Student",
+            "phone": "97 444-55-66",
+            "password": "Pass12345!",
+            "groupTitle": "Advanced",
+            "time": "19:45",
+            "daysPattern": "TTS",
+        }
+        response = self.client.post("/api/auth/register", payload, format="json")
+        self.assertEqual(response.status_code, 201)
+        created = User.objects.get(phone="+998974445566")
+        self.assertEqual(created.group_id, unique_group.id)
+
     def test_login_accepts_phone_variants(self):
         response = self.client.post(
             "/api/auth/login",
@@ -114,6 +134,24 @@ class BackendSmokeTests(TestCase):
             format="json",
         )
         self.assertEqual(response.status_code, 402)
+
+    def test_free_student_can_load_unlocked_site_apis(self):
+        self.auth("+998909000002", "Pass12345!")
+
+        state_response = self.client.get("/api/platform/state")
+        self.assertEqual(state_response.status_code, 200)
+        payload = state_response.data["data"]
+        self.assertFalse(payload["subscription"]["isPaid"])
+        self.assertTrue(payload["teachers"])
+        group_payload = next(item for item in payload["groups"] if item["id"] == str(self.group.id))
+        self.assertEqual(group_payload["studentsCount"], 1)
+        self.assertNotIn("Inactive Student", [item["fullName"] for item in payload["students"]])
+
+        homework_response = self.client.get("/api/student/homework/tasks")
+        self.assertEqual(homework_response.status_code, 200)
+
+        friendly_response = self.client.get("/api/chat/friendly/conversations")
+        self.assertEqual(friendly_response.status_code, 200)
 
     def test_global_rating_excludes_inactive_students(self):
         self.auth("+998909000001", "Pass12345!")

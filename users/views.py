@@ -163,6 +163,12 @@ def normalize_register_payload(data):
     if "group_id" not in payload and "groupId" in payload:
         payload["group_id"] = payload.get("groupId")
 
+    if "group" not in payload and "groupTitle" in payload:
+        payload["group"] = payload.get("groupTitle")
+
+    if "days_pattern" not in payload and "daysPattern" in payload:
+        payload["days_pattern"] = payload.get("daysPattern")
+
     return payload
 
 
@@ -487,6 +493,7 @@ def to_front_group(group):
         "time": group.time,
         "daysPattern": group.days_pattern,
         "teacherId": str(group.teacher_id),
+        "studentsCount": group.students.filter(role="student", is_active=True, is_iman_student=True).count(),
     }
 
 
@@ -2319,9 +2326,7 @@ class PlatformStateView(APIView):
                     include_phone=request.user.role == "teacher",
                 )
                 for teacher in teachers
-            ]
-            if paid_access or request.user.role == "teacher"
-            else [],
+            ],
             "groups": [to_front_group(group) for group in groups],
             "rankings": rankings,
             "ratingLogs": rating_logs if paid_access or request.user.role == "teacher" else [],
