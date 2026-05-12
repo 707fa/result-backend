@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 .venv/
 venv/
 env/
@@ -10,3 +12,7 @@ media/
 staticfiles/
 .DS_Store
 .idea/
+*.save
+*.bak
+*.tmp
+*.log
