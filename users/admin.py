@@ -67,13 +67,39 @@ class TeacherGroupFilter(admin.SimpleListFilter):
         return queryset
 
 
+class RecentRegistrationFilter(admin.SimpleListFilter):
+    title = "registration date"
+    parameter_name = "registration"
+
+    def lookups(self, request, model_admin):
+        return (
+            ("today", "Registered today"),
+            ("week", "Registered this week"),
+            ("month", "Registered this month"),
+        )
+
+    def queryset(self, request, queryset):
+        now = timezone.now()
+        if self.value() == "today":
+            start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            return queryset.filter(date_joined__gte=start)
+        if self.value() == "week":
+            start = now - timedelta(days=7)
+            return queryset.filter(date_joined__gte=start)
+        if self.value() == "month":
+            start = now - timedelta(days=30)
+            return queryset.filter(date_joined__gte=start)
+        return queryset
+
+
 @admin.register(User)
 class UserAdmin(DjangoUserAdmin):
-    list_display = ("id", "full_name", "phone", "role", "points", "group", "is_paid", "paid_until", "is_active")
+    list_display = ("id", "full_name", "phone", "role", "points", "group", "is_paid", "paid_until", "date_joined", "is_active")
     search_fields = ("full_name", "phone")
-    list_filter = ("role", "is_paid", "is_active", "is_iman_student", "group")
+    list_filter = ("role", "is_paid", "is_active", "is_iman_student", "group", RecentRegistrationFilter)
     list_editable = ("group", "is_paid", "paid_until", "is_active")
-    ordering = ("role", "full_name")
+    ordering = ("-date_joined", "role", "full_name")
+    readonly_fields = ("date_joined", "last_login", "phone", "username")
     actions = (
         "grant_30_days",
         "grant_90_days",
