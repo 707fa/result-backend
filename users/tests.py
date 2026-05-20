@@ -1,7 +1,10 @@
+from unittest.mock import patch
+
 from django.contrib import admin
 from django.contrib.auth import authenticate
 from django.contrib.auth import get_user_model
-from django.test import RequestFactory, TestCase
+from django.test import RequestFactory, TestCase, override_settings
+from django.urls import resolve
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
@@ -129,6 +132,28 @@ class BackendSmokeTests(TestCase):
             format="json",
         )
         self.assertEqual(response.status_code, 401)
+
+    def test_token_refresh_endpoint_uses_auth_refresh_throttle_scope(self):
+        match = resolve("/api/token/refresh/")
+        self.assertEqual(getattr(match.func.view_class, "throttle_scope", ""), "auth_refresh")
+
+    @override_settings(DEBUG=False)
+    @patch.dict(
+        "os.environ",
+        {"TELEGRAM_BOT_SECRET": "", "PAYMENT_WEBHOOK_SECRET": "", "ALLOW_INSECURE_WEBHOOKS": "true"},
+    )
+    def test_telegram_webhook_stays_locked_without_secret_in_production(self):
+        response = self.client.post("/api/payments/webhook/telegram", {}, format="json")
+        self.assertEqual(response.status_code, 401)
+
+    @override_settings(DEBUG=False)
+    def test_public_health_does_not_expose_provider_configuration(self):
+        response = self.client.get("/api/health")
+        self.assertEqual(response.status_code, 200)
+        data = response.data["data"]
+        self.assertIn("database", data)
+        self.assertNotIn("aiConfigured", data)
+        self.assertNotIn("telegramConfigured", data)
 
     def test_admin_auth_accepts_username_field(self):
         user = authenticate(username="+998909000001", password="Pass12345!")

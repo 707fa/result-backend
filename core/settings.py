@@ -123,7 +123,7 @@ ALLOWED_HOSTS = get_env_list("ALLOWED_HOSTS", "127.0.0.1,localhost")
 CSRF_TRUSTED_ORIGINS = get_env_list("CSRF_TRUSTED_ORIGINS")
 CORS_ALLOWED_ORIGINS = get_env_list("CORS_ALLOWED_ORIGINS")
 CORS_ALLOW_ALL_ORIGINS = get_env_bool("CORS_ALLOW_ALL_ORIGINS", False)
-CORS_ALLOW_CREDENTIALS = get_env_bool("CORS_ALLOW_CREDENTIALS", True)
+CORS_ALLOW_CREDENTIALS = get_env_bool("CORS_ALLOW_CREDENTIALS", False)
 CORS_ALLOWED_ORIGIN_REGEXES = []
 ALLOW_VERCEL_PREVIEW_ORIGINS = get_env_bool("ALLOW_VERCEL_PREVIEW_ORIGINS", DEBUG)
 if ALLOW_VERCEL_PREVIEW_ORIGINS:
@@ -281,6 +281,7 @@ REST_FRAMEWORK = {
         "anon": os.environ.get("DRF_THROTTLE_ANON", "60/min"),
         "user": os.environ.get("DRF_THROTTLE_USER", "240/min"),
         "auth_login": os.environ.get("DRF_THROTTLE_AUTH_LOGIN", "8/min"),
+        "auth_refresh": os.environ.get("DRF_THROTTLE_AUTH_REFRESH", "20/min"),
         "auth_register": os.environ.get("DRF_THROTTLE_AUTH_REGISTER", "4/min"),
         "voice_tts": os.environ.get("DRF_THROTTLE_VOICE_TTS", "20/min"),
         "ai_chat": os.environ.get("DRF_THROTTLE_AI_CHAT", "30/min"),
@@ -315,7 +316,12 @@ from datetime import timedelta
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=int(os.environ.get("JWT_ACCESS_MINUTES", "60"))),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=int(os.environ.get("JWT_REFRESH_DAYS", "7"))),
+    "AUTH_HEADER_TYPES": ("Bearer",),
+    "UPDATE_LAST_LOGIN": False,
 }
+
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.environ.get("DATA_UPLOAD_MAX_MEMORY_SIZE", str(5 * 1024 * 1024)))
+FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.environ.get("FILE_UPLOAD_MAX_MEMORY_SIZE", str(5 * 1024 * 1024)))
 
 STATICFILES_DIRS = [BASE_DIR / "static"]
 STATIC_URL = "/static/"

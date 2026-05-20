@@ -1109,9 +1109,10 @@ class HealthView(APIView):
         data = {
             "status": "ok" if db_ok else "degraded",
             "database": db_ok,
-            "aiConfigured": ai_configured,
-            "telegramConfigured": bool(_telegram_bot_token() and _telegram_chat_ids()),
         }
+        if settings.DEBUG:
+            data["aiConfigured"] = ai_configured
+            data["telegramConfigured"] = bool(_telegram_bot_token() and _telegram_chat_ids())
         return success_response("Health check", data)
 
 
@@ -1135,14 +1136,21 @@ def get_subscription_days():
 
 
 def resolve_payment_return_url():
+    default_url = (
+        "http://127.0.0.1:5188/student/subscription"
+        if getattr(settings, "DEBUG", False)
+        else "https://iman-bekhruz.uz/student/subscription"
+    )
     candidate = (
         os.environ.get("PAYMENT_RETURN_URL")
         or os.environ.get("FRONTEND_BASE_URL")
-        or "http://127.0.0.1:5188/student/subscription"
+        or default_url
     )
     url = str(candidate or "").strip()
     if not (url.startswith("http://") or url.startswith("https://")):
-        return "http://127.0.0.1:5188/student/subscription"
+        return default_url
+    if not getattr(settings, "DEBUG", False) and url.startswith("http://"):
+        return default_url
     return url
 
 
@@ -1459,7 +1467,7 @@ def is_valid_telegram_webhook_secret(request):
     configured = str(os.environ.get("TELEGRAM_BOT_SECRET") or os.environ.get("PAYMENT_WEBHOOK_SECRET") or "").strip()
     if not configured:
         allow_insecure = str(os.environ.get("ALLOW_INSECURE_WEBHOOKS", "") or "").strip().lower() in {"1", "true", "yes", "on"}
-        return settings.DEBUG or allow_insecure
+        return bool(settings.DEBUG and allow_insecure)
 
     provided = (
         request.headers.get("X-Telegram-Bot-Api-Secret-Token")
@@ -3370,6 +3378,8 @@ class SupportTicketListCreateView(APIView):
         message = (request.data.get("message") or "").strip()
         if len(message) < 3:
             return error_response("Validation error", {"message": ["Message is too short"]}, status.HTTP_400_BAD_REQUEST)
+        if len(message) > 2000:
+            return error_response("Validation error", {"message": ["Message is too long"]}, status.HTTP_400_BAD_REQUEST)
 
         ticket = SupportTicket.objects.create(
             student=request.user,
