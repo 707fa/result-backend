@@ -8,6 +8,7 @@ import re
 import uuid
 import hashlib
 from base64 import b64encode
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 from urllib.parse import urlencode
@@ -909,6 +910,8 @@ class LoginView(APIView):
             )
 
         refresh = RefreshToken.for_user(user)
+        if serializer.validated_data.get("remember_me"):
+            refresh.set_exp(lifetime=timedelta(days=365))
 
         payload = build_auth_payload(user, refresh, request)
         return success_response_with_compat(

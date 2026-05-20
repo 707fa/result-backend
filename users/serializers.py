@@ -208,6 +208,7 @@ class RegisterSerializer(serializers.Serializer):
 class LoginSerializer(serializers.Serializer):
     phone = serializers.CharField(max_length=20)
     password = serializers.CharField(max_length=128, trim_whitespace=False)
+    remember_me = serializers.BooleanField(required=False, default=False)
 
     def validate_phone(self, value):
         return _normalize_phone(value)

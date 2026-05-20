@@ -3,6 +3,7 @@ from django.contrib.auth import authenticate
 from django.contrib.auth import get_user_model
 from django.test import RequestFactory, TestCase
 from rest_framework.test import APIClient
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from groups.models import Group
 
@@ -108,6 +109,18 @@ class BackendSmokeTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data.get("role"), "teacher")
+
+    def test_login_remember_me_extends_refresh_token_to_one_year(self):
+        response = self.client.post(
+            "/api/auth/login",
+            {"phone": "909000001", "password": "Pass12345!", "remember_me": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        refresh = RefreshToken(response.data.get("refreshToken"))
+        lifetime_seconds = int(refresh["exp"]) - int(refresh["iat"])
+        self.assertGreaterEqual(lifetime_seconds, 365 * 24 * 60 * 60 - 60)
 
     def test_inactive_user_cannot_login(self):
         response = self.client.post(
