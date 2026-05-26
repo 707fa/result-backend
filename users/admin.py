@@ -16,6 +16,7 @@ class PaymentInline(admin.TabularInline):
     verbose_name_plural = "Payments"
     fields = ("id", "provider", "amount", "status", "created_at", "paid_at")
     readonly_fields = ("id", "provider", "amount", "status", "created_at", "paid_at")
+    fk_name = "user"
 
     def has_add_permission(self, request, obj=None):
         return False
@@ -368,21 +369,21 @@ class GrammarTopicAdmin(admin.ModelAdmin):
 
 @admin.register(HomeworkTask)
 class HomeworkTaskAdmin(admin.ModelAdmin):
-    list_display = ("id", "title", "group", "due_date", "created_at")
+    list_display = ("id", "title", "group", "due_at", "created_at")
     list_filter = ("group",)
     search_fields = ("title",)
 
 
 @admin.register(HomeworkSubmission)
 class HomeworkSubmissionAdmin(admin.ModelAdmin):
-    list_display = ("id", "student", "task", "submitted_at", "score")
+    list_display = ("id", "student", "task", "created_at", "score")
     list_filter = ("task",)
     search_fields = ("student__full_name",)
 
 
 @admin.register(SupportTicket)
 class SupportTicketAdmin(admin.ModelAdmin):
-    list_display = ("id", "student", "subject", "status", "created_at")
+    list_display = ("id", "student", "message", "status", "created_at")
     list_filter = ("status",)
     list_editable = ("status",)
-    search_fields = ("subject", "student__full_name")
+    search_fields = ("student__full_name",)
