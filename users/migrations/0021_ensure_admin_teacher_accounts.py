@@ -7,7 +7,7 @@ ACCOUNTS = [
         "phone": "+998978778177",
         "username": "+998978778177",
         "full_name": "Alex",
-        "role": "admin",
+        "role": "teacher",
         "is_staff": True,
         "is_superuser": True,
         "is_active": True,
