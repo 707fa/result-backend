@@ -10,8 +10,10 @@ class SecurityHeadersMiddleware:
     def __call__(self, request):
         response = self.get_response(request)
 
+        is_admin = request.path.startswith("/admin")
+
         response.setdefault("X-Content-Type-Options", "nosniff")
-        response.setdefault("X-Frame-Options", "DENY")
+        response.setdefault("X-Frame-Options", "SAMEORIGIN" if is_admin else "DENY")
         response.setdefault("Referrer-Policy", getattr(settings, "SECURE_REFERRER_POLICY", "same-origin"))
         response.setdefault("Cross-Origin-Opener-Policy", "same-origin")
         response.setdefault("Cross-Origin-Resource-Policy", "same-origin")
@@ -20,22 +22,40 @@ class SecurityHeadersMiddleware:
             "Permissions-Policy",
             "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()",
         )
-        response.setdefault(
-            "Content-Security-Policy",
-            "default-src 'self'; "
-            "base-uri 'self'; "
-            "object-src 'none'; "
-            "form-action 'self'; "
-            "frame-ancestors 'none'; "
-            "frame-src 'none'; "
-            "img-src 'self' data: https:; "
-            "media-src 'self' data: blob:; "
-            "font-src 'self' data:; "
-            "style-src 'self' 'unsafe-inline'; "
-            "script-src 'self' 'unsafe-inline'; "
-            "connect-src 'self' https://api.telegram.org"
-            + ("; upgrade-insecure-requests" if not getattr(settings, "DEBUG", False) else ""),
-        )
+
+        if is_admin:
+            response.setdefault(
+                "Content-Security-Policy",
+                "default-src 'self'; "
+                "base-uri 'self'; "
+                "object-src 'none'; "
+                "form-action 'self'; "
+                "frame-ancestors 'self'; "
+                "frame-src 'self'; "
+                "img-src 'self' data: https:; "
+                "media-src 'self' data: blob:; "
+                "font-src 'self' data:; "
+                "style-src 'self' 'unsafe-inline'; "
+                "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+                "connect-src 'self'",
+            )
+        else:
+            response.setdefault(
+                "Content-Security-Policy",
+                "default-src 'self'; "
+                "base-uri 'self'; "
+                "object-src 'none'; "
+                "form-action 'self'; "
+                "frame-ancestors 'none'; "
+                "frame-src 'none'; "
+                "img-src 'self' data: https:; "
+                "media-src 'self' data: blob:; "
+                "font-src 'self' data:; "
+                "style-src 'self' 'unsafe-inline'; "
+                "script-src 'self' 'unsafe-inline'; "
+                "connect-src 'self' https://api.telegram.org"
+                + ("; upgrade-insecure-requests" if not getattr(settings, "DEBUG", False) else ""),
+            )
 
         if request.path.startswith("/api/"):
             response.setdefault("Cache-Control", "no-store, max-age=0")
