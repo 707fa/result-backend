@@ -11,58 +11,7 @@ TEACHER_PHONE = "+998900000001"
 
 
 def seed_student_account(apps, schema_editor):
-    if str(os.environ.get("ENABLE_DEMO_SEED", "") or "").strip().lower() not in {"1", "true", "yes", "on"}:
-        return
-
-    student_password = str(os.environ.get("DEMO_STUDENT_PASSWORD", "") or "").strip()
-    teacher_password = str(os.environ.get("DEMO_TEACHER_PASSWORD", "") or "").strip()
-    if not student_password or not teacher_password:
-        return
-
-    User = apps.get_model("users", "User")
-    Group = apps.get_model("groups", "Group")
-
-    teacher = User.objects.filter(role="teacher", is_active=True).order_by("id").first()
-    if teacher is None:
-        teacher, _ = User.objects.update_or_create(
-            phone=TEACHER_PHONE,
-            defaults={
-                "username": TEACHER_PHONE,
-                "full_name": "Iman | Bekhruz",
-                "password": make_password(teacher_password),
-                "role": "teacher",
-                "is_active": True,
-                "is_staff": True,
-            },
-        )
-
-    group = (
-        Group.objects.filter(title__iexact="Beginner", time="15:30", days_pattern="mwf").order_by("id").first()
-        or Group.objects.filter(title__iexact="Beginner", time="15:30").order_by("id").first()
-    )
-    if group is None:
-        group = Group.objects.create(
-            title="Beginner",
-            time="15:30",
-            days_pattern="mwf",
-            teacher=teacher,
-        )
-
-    paid_until = timezone.make_aware(datetime(2035, 1, 1, 0, 0, 0))
-    User.objects.update_or_create(
-        phone=STUDENT_PHONE,
-        defaults={
-            "username": STUDENT_PHONE,
-            "full_name": "Ахроров Фаррух",
-            "password": make_password(student_password),
-            "role": "student",
-            "group": group,
-            "is_active": True,
-            "is_iman_student": True,
-            "is_paid": True,
-            "paid_until": paid_until,
-        },
-    )
+    pass
 
 
 def noop_reverse(apps, schema_editor):
