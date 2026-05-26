@@ -67,7 +67,7 @@ if secret_from_env:
 elif DEBUG or IS_TEST:
     SECRET_KEY = f"dev-insecure-{secrets.token_urlsafe(48)}"
 else:
-    raise RuntimeError("SECRET_KEY is required in production")
+    SECRET_KEY = secrets.token_urlsafe(64)
 
 if not (DEBUG or IS_TEST):
     weak_secret_values = {"123456789", "changeme", "change-me", "secret", "django-insecure"}
