@@ -6,7 +6,22 @@ from django.contrib.auth.models import Group as AuthGroup
 from django.db.models import Q
 from django.utils import timezone
 
-from .models import PaymentTransaction, User
+from .models import PaymentTransaction, User, GrammarTopic, HomeworkTask, HomeworkSubmission, SupportTicket
+
+
+class PaymentInline(admin.TabularInline):
+    model = PaymentTransaction
+    extra = 0
+    verbose_name = "Payment"
+    verbose_name_plural = "Payments"
+    fields = ("id", "provider", "amount", "status", "created_at", "paid_at")
+    readonly_fields = ("id", "provider", "amount", "status", "created_at", "paid_at")
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 admin.site.unregister(AuthGroup)
@@ -100,6 +115,7 @@ class UserAdmin(DjangoUserAdmin):
     list_editable = ("group", "is_paid", "paid_until", "is_active")
     ordering = ("-date_joined", "role", "full_name")
     readonly_fields = ("date_joined", "last_login", "phone", "username")
+    inlines = [PaymentInline]
     actions = (
         "grant_30_days",
         "grant_90_days",
@@ -314,7 +330,7 @@ class UserAdmin(DjangoUserAdmin):
 
     @admin.action(description="Deactivate students")
     def deactivate_students(self, request, queryset):
-        queryset.filter(role="student").update(is_active=False, is_iman_student=False, group=None)
+        queryset.filter(role="student").update(is_active=False, is_iman_student=False, is_paid=False, paid_until=None, group=None)
 
     @admin.action(description="Activate students")
     def activate_students(self, request, queryset):
@@ -341,3 +357,32 @@ class PaymentTransactionAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return request.user.is_superuser
+
+
+@admin.register(GrammarTopic)
+class GrammarTopicAdmin(admin.ModelAdmin):
+    list_display = ("id", "title", "level", "is_active")
+    list_editable = ("is_active",)
+    search_fields = ("title",)
+
+
+@admin.register(HomeworkTask)
+class HomeworkTaskAdmin(admin.ModelAdmin):
+    list_display = ("id", "title", "group", "due_date", "created_at")
+    list_filter = ("group",)
+    search_fields = ("title",)
+
+
+@admin.register(HomeworkSubmission)
+class HomeworkSubmissionAdmin(admin.ModelAdmin):
+    list_display = ("id", "student", "task", "submitted_at", "score")
+    list_filter = ("task",)
+    search_fields = ("student__full_name",)
+
+
+@admin.register(SupportTicket)
+class SupportTicketAdmin(admin.ModelAdmin):
+    list_display = ("id", "student", "subject", "status", "created_at")
+    list_filter = ("status",)
+    list_editable = ("status",)
+    search_fields = ("subject", "student__full_name")

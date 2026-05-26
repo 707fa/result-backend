@@ -618,7 +618,6 @@ def to_front_student(request, student, include_phone=True, include_private=False
         "id": str(student.id),
         "fullName": student.full_name,
         "phone": student.phone if include_phone else "",
-        "password": "",
         "groupId": str(student.group_id) if student.group_id else "",
         "avatarUrl": avatar_url(request, student),
         "points": float(student.points),
@@ -636,7 +635,6 @@ def to_front_teacher(request, teacher, group_ids, include_phone=False):
         "id": str(teacher.id),
         "fullName": teacher.full_name,
         "phone": teacher.phone if include_phone else "",
-        "password": "",
         "groupIds": [str(group_id) for group_id in group_ids],
         "avatarUrl": avatar_url(request, teacher),
     }
@@ -1087,6 +1085,13 @@ class LogoutView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
+        refresh_token = request.data.get("refresh") or request.data.get("refreshToken")
+        if refresh_token:
+            try:
+                from rest_framework_simplejwt.tokens import RefreshToken
+                RefreshToken(refresh_token).blacklist()
+            except Exception:
+                pass
         return success_response("Logout successful", {})
 
 
@@ -1186,7 +1191,7 @@ def parse_decimal_value(raw_value):
 
 def amount_matches_transaction(transaction_amount, payload_amount):
     if payload_amount is None:
-        return True
+        return False
 
     tx_value = Decimal(transaction_amount).quantize(Decimal("0.01"))
     payload_value = Decimal(payload_amount).quantize(Decimal("0.01"))
@@ -1453,7 +1458,7 @@ def _telegram_sign(action, tx_id, days):
         return None
     base = f"{action}:{tx_id}:{days}"
     digest = hmac.new(secret.encode("utf-8"), base.encode("utf-8"), hashlib.sha256).hexdigest()
-    return digest[:16]
+    return digest[:32]
 
 
 def _telegram_verify_sign(action, tx_id, days, sign):

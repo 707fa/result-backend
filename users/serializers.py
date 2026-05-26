@@ -86,6 +86,14 @@ def _find_group_by_fields(raw_title, raw_time, raw_days):
         if direct:
             return direct
 
+    if normalized_title:
+        for group in queryset:
+            db_normalized = _normalize_group_title(group.title)
+            if db_normalized and normalized_title.startswith(db_normalized):
+                if normalized_time and _normalize_time(group.time) != normalized_time:
+                    continue
+                return group
+
     for group in queryset:
         if normalized_title and _normalize_group_title(group.title) != normalized_title:
             continue

@@ -1,5 +1,25 @@
 from django.contrib import admin
 from .models import Group
+from users.models import User
+
+
+class GroupStudentInline(admin.TabularInline):
+    model = User
+    extra = 0
+    verbose_name = "Student"
+    verbose_name_plural = "Students"
+    fields = ("full_name", "phone", "points", "is_paid", "paid_until", "is_active")
+    readonly_fields = ("full_name", "phone", "points")
+    fk_name = "group"
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).filter(role="student")
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(Group)
@@ -9,6 +29,7 @@ class GroupAdmin(admin.ModelAdmin):
     search_fields = ("title", "time", "teacher__full_name", "teacher__phone")
     list_filter = ("days_pattern", "teacher")
     ordering = ("title", "time")
+    inlines = [GroupStudentInline]
 
     def students_count(self, obj):
         return obj.students.filter(role="student", is_active=True, is_iman_student=True).count()
